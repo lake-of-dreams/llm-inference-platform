@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+gateway/app/__init__.py
+gateway/app/cache.py
+gateway/app/client.py
+gateway/app/router.py
+gateway/model_gateway.egg-info/PKG-INFO
+gateway/model_gateway.egg-info/SOURCES.txt
+gateway/model_gateway.egg-info/dependency_links.txt
+gateway/model_gateway.egg-info/requires.txt
+gateway/model_gateway.egg-info/top_level.txt
