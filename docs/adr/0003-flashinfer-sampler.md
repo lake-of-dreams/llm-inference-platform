@@ -1,6 +1,6 @@
 # ADR-0003: Disable the FlashInfer sampler on this hardware
 
-**Status:** Accepted · **Date:** 2026-09
+**Status:** Accepted, revisited 2026-10 · **Date:** 2026-09
 
 ## Context
 First start of vLLM 0.29.0 on an RTX 500 Ada (SM 8.9, 4 GB) died with:
@@ -33,3 +33,17 @@ in `hack/serve-vllm.sh`.
 * Revisit when the driver or the FlashInfer version moves.
 * A healthy "Available KV cache memory" line immediately before an engine-core
   failure rules memory out, so read forwards from the last success.
+
+## Revisited for vLLM v0.30.0
+
+The operator now runs vLLM v0.30.0. In that release the FlashInfer sampler is still on unless
+`VLLM_USE_FLASHINFER_SAMPLER=0` is set (`vllm/envs.py`). The decision therefore still stands for
+`hack/serve-vllm.sh`.
+
+## Open questions
+
+* The operator does not set this variable on the pods it creates. Nobody has yet run v0.30.0 on
+  the RTX 500 Ada to see whether the JIT compile still fails. Until someone does, a pod on this
+  card may hit the same failure. Setting it per InferenceService needs a spec field, and that
+  waits on the test.
+

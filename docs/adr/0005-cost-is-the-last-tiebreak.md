@@ -21,3 +21,14 @@ substitution has no way to know its results no longer compare with yesterday's.
 * Some requests fail that a downgrading gateway would have served. Intended.
 * Every rejection carries its reason (`RoutingDecision.rejected`), so "why did
   this route here" is answerable after the fact.
+* The latency filter is only as good as its p95 figure. `app.metrics.with_observed_ttft` replaces
+  the configured figure with the one Prometheus observed. A backend with no recent traffic keeps
+  its configured figure, because zero would make an idle backend look fastest.
+* A cache in front of the router can undo the classification filter by serving an answer across
+  classifications. ADR-0006 closes that.
+
+## Open questions
+
+* Cost ranks backends by hourly price. Two backends with the same price and different throughput
+  cost different amounts per answer. Ranking by cost per token needs measured throughput, which
+  the gateway does not collect yet.
