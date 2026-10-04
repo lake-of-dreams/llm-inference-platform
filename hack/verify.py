@@ -11,7 +11,7 @@ import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "gateway"))
 
-from app.cache import SemanticCache, cosine, embed
+from app.cache import CacheScope, SemanticCache, cosine, embed
 from app.client import Ledger, complete
 from app.router import Backend, Classification, NoEligibleBackend, Request, route
 
@@ -83,6 +83,9 @@ for label, req in [
     ledger.add(rec)
     check(f"{label} -> {dec.backend.name} returned text",
           len(text) > 0, f"{rec.latency_ms}ms, {rec.completion_tokens} tok, '{text[:40]}'")
+    check(f"{label} -> {dec.backend.name} measured time to first token",
+          rec.ttft_ms is not None and rec.ttft_ms <= rec.latency_ms,
+          f"ttft={rec.ttft_ms}ms of {rec.latency_ms}ms")
 
 print("\n=== 3. Semantic cache false-hit guard (live) ===")
 # Measure the pair first. If the threshold rejects the near-miss on its own then
@@ -94,23 +97,27 @@ q3 = "what is the balance for account 811"          # different account
 dec = route(Request(q1), POOL)
 a1, rec = complete(dec.backend, q1, max_tokens=24)
 ledger.add(rec)
-cache.put(q1, a1)
+scope = CacheScope.of(Classification.INTERNAL, dec.backend.model, temperature=0.2, max_tokens=24)
+cache.put(q1, a1, scope)
 
-check("identical prompt served from cache", cache.get(q1) == a1)
+check("identical prompt served from cache", cache.get(q1, scope) == a1)
+check("the same prompt from a Public caller is NOT served a cached Internal answer",
+      cache.get(q1, CacheScope.of(Classification.PUBLIC, dec.backend.model,
+                                  temperature=0.2, max_tokens=24)) is None)
 
 sim_same = cosine(embed(q1), embed(q2))
 check("paraphrase sits above threshold (guard is the active control)",
       sim_same >= cache.threshold, f"cosine={sim_same:.4f} >= {cache.threshold}")
-check("true paraphrase IS served from cache", cache.get(q2) == a1,
+check("true paraphrase IS served from cache", cache.get(q2, scope) == a1,
       f"cosine={sim_same:.4f}")
 
 # Drop the threshold below the measured similarity of the pair, so the guard is
 # the only thing left that can stop the near-miss.
 sim_diff = cosine(embed(q1), embed(q3))
 probe = SemanticCache(threshold=sim_diff - 0.01)
-probe.put(q1, a1)
+probe.put(q1, a1, scope)
 before = probe.false_hits_blocked
-served = probe.get(q3)
+served = probe.get(q3, scope)
 check("numeric near-miss blocked BY THE GUARD, not the threshold",
       served is None and probe.false_hits_blocked == before + 1,
       f"cosine={sim_diff:.4f} > threshold={probe.threshold:.4f}, "

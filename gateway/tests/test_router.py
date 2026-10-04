@@ -1,5 +1,4 @@
 import pytest
-from app.cache import SemanticCache
 from app.router import Backend, Classification, NoEligibleBackend, Request, route
 
 VLLM = Backend("vllm-qwen", "http://localhost:8001/v1", "Qwen/Qwen2.5-0.5B-Instruct",
@@ -43,18 +42,3 @@ def test_latency_budget_excludes_slow_backend():
 def test_gate_raises_never_downgrades():
     with pytest.raises(NoEligibleBackend):
         route(Request("x", required_capabilities=frozenset({"vision"})), POOL)
-
-
-def test_semantic_cache_blocks_numeric_near_miss():
-    c = SemanticCache(threshold=0.80)
-    c.put("what is the balance for account 118", "Balance is 42")
-    # same wording, different account. must not be a hit.
-    assert c.get("what is the balance for account 811") is None
-    assert c.false_hits_blocked == 1
-
-
-def test_semantic_cache_serves_true_paraphrase():
-    c = SemanticCache(threshold=0.50)
-    c.put("what is the capital of france", "Paris")
-    assert c.get("what is the capital of france") == "Paris"
-    assert c.hits == 1
