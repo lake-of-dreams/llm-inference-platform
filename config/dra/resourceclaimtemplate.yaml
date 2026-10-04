@@ -1,0 +1,35 @@
+# Dynamic Resource Allocation. resource.k8s.io/v1 is GA in Kubernetes 1.34, gate
+# locked on in 1.35.
+#
+# `limits: nvidia.com/gpu: 1` counts devices and says nothing about them. An L4
+# and an H100 both count as 1, and a model that fits one OOMs on the other. Here
+# the pod describes what it needs and the scheduler matches it.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.nvidia.com
+spec:
+  selectors:
+    - cel:
+        expression: device.driver == "gpu.nvidia.com"
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: qwen-small-gpu-template
+  namespace: llm-platform
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+            # a memory floor rather than a count, so the claim cannot land on
+            # a device too small to hold the KV cache at this context length
+            selectors:
+              - cel:
+                  expression: >-
+                    device.capacity["gpu.nvidia.com"].memory.compareTo(quantity("3Gi")) >= 0

@@ -1,0 +1,44 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: qwen-small
+  namespace: llm-platform
+spec:
+  scaleTargetRef:
+    name: qwen-small            # the Deployment the operator created
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  pollingInterval: 15
+  # Weight loading takes minutes. A short cooldown takes a replica away while
+  # the next one is still loading and you never get out of cold start. ADR-0001.
+  cooldownPeriod: 300
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0      # queue depth is the demand signal; react now
+          policies: [{type: Pods, value: 1, periodSeconds: 60}]
+        scaleDown:
+          stabilizationWindowSeconds: 300    # never thrash a GPU pod
+          policies: [{type: Pods, value: 1, periodSeconds: 300}]
+  triggers:
+    # Primary signal. vllm:num_requests_waiting leads latency collapse; GPU
+    # utilisation lags it and can fall while sequences queue, because decode is
+    # memory-bandwidth bound. An HPA on GPU util or CPU scales DOWN at the worst
+    # possible moment. ADR-0001.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        query: sum(vllm:num_requests_waiting{model_name="qwen-small"})
+        threshold: "4"
+    # Guardrail: p95 time-to-first-token against the SLO. KEDA takes the max
+    # across triggers, so this still scales when the queue looks healthy but long
+    # prompts are saturating prefill.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        query: |
+          histogram_quantile(0.95,
+            sum(rate(vllm:time_to_first_token_seconds_bucket{model_name="qwen-small"}[2m]))
+            by (le)) * 1000
+        threshold: "2000"

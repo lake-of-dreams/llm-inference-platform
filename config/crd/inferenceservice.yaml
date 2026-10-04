@@ -1,0 +1,118 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: inferenceservices.serving.platform.io
+spec:
+  group: serving.platform.io
+  scope: Namespaced
+  names:
+    kind: InferenceService
+    listKind: InferenceServiceList
+    plural: inferenceservices
+    singular: inferenceservice
+    shortNames: [isvc]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      # /status keeps the operator's writes off the spec path, so it never races
+      # whoever is editing the spec. /scale is what lets KEDA target this object
+      # instead of reaching past it to the Deployment.
+      subresources:
+        status: {}
+        scale:
+          specReplicasPath: .spec.autoscaling.minReplicas
+          statusReplicasPath: .status.readyReplicas
+      additionalPrinterColumns:
+        - name: Backend
+          type: string
+          jsonPath: .spec.backend
+        - name: Model
+          type: string
+          jsonPath: .spec.model
+        - name: Class
+          type: string
+          jsonPath: .spec.classification
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [model]
+              properties:
+                model:
+                  type: string
+                  minLength: 1
+                backend:
+                  type: string
+                  enum: [vLLM, Ollama]
+                  default: vLLM
+                classification:
+                  type: string
+                  enum: [Public, Internal, Restricted]
+                  default: Internal
+                maxModelLen:
+                  type: integer
+                  minimum: 256
+                  default: 4096
+                gpuMemoryUtilization:
+                  type: integer
+                  minimum: 10
+                  maximum: 95
+                  default: 85
+                deviceClass:
+                  type: string
+                weightLoadSeconds:
+                  type: integer
+                  minimum: 10
+                  default: 600
+                costPerHourMilliUSD:
+                  type: integer
+                  default: 0
+                autoscaling:
+                  type: object
+                  properties:
+                    minReplicas: {type: integer, minimum: 0, default: 1}
+                    maxReplicas: {type: integer, minimum: 1, default: 4}
+                    queueDepthTarget: {type: integer, minimum: 1, default: 4}
+                    ttftP95Milliseconds: {type: integer, minimum: 50, default: 2000}
+                  default: {}
+              # Policy at admission. A Restricted model with no deviceClass is
+              # rejected by the API server before a pod exists, and it still
+              # holds with the operator down.
+              x-kubernetes-validations:
+                - rule: "self.classification != 'Restricted' || (has(self.deviceClass) && self.deviceClass != '')"
+                  message: "Restricted classification requires an explicit deviceClass"
+                - rule: "!has(self.autoscaling) || self.autoscaling.maxReplicas >= self.autoscaling.minReplicas"
+                  message: "maxReplicas must be >= minReplicas"
+                - rule: "self.backend != 'Ollama' || self.classification != 'Restricted'"
+                  message: "Ollama backend is not approved for Restricted data"
+            status:
+              type: object
+              properties:
+                observedGeneration: {type: integer}
+                readyReplicas: {type: integer}
+                endpoint: {type: string}
+                phase: {type: string}
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, lastTransitionTime, reason]
+                    properties:
+                      type: {type: string}
+                      status: {type: string}
+                      reason: {type: string}
+                      message: {type: string}
+                      observedGeneration: {type: integer}
+                      lastTransitionTime: {type: string, format: date-time}
