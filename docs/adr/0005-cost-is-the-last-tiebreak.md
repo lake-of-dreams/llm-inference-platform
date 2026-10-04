@@ -1,6 +1,6 @@
 # ADR-0005: Route on classification, then capability, then latency, then cost
 
-**Status:** Accepted · **Date:** 2026-09
+**Status:** Accepted
 
 ## Context
 The tempting selection rule for a gateway fronting several models is

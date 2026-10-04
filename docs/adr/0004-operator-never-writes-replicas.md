@@ -1,6 +1,6 @@
 # ADR-0004: The operator never writes .spec.replicas after creation
 
-**Status:** Accepted, revised 2026-10 · **Date:** 2026-09
+**Status:** Accepted, revised
 
 ## Context
 

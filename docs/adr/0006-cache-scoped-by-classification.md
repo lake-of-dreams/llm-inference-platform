@@ -1,6 +1,6 @@
 # ADR-0006: The semantic cache is scoped by classification, model and sampling settings
 
-**Status:** Accepted · **Date:** 2026-10
+**Status:** Accepted
 
 ## Context
 

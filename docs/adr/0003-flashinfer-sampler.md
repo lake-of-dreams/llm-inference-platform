@@ -1,6 +1,6 @@
 # ADR-0003: Disable the FlashInfer sampler on this hardware
 
-**Status:** Accepted, revisited 2026-10 · **Date:** 2026-09
+**Status:** Accepted, revisited
 
 ## Context
 First start of vLLM 0.29.0 on an RTX 500 Ada (SM 8.9, 4 GB) died with:

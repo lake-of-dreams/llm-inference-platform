@@ -41,8 +41,7 @@ each request to a machine that is allowed to see it.
 
 ## A note on accuracy
 
-The version numbers and behaviour described here were checked in October 2026 against the source
-code of vLLM v0.30.0, Ollama v0.35.1, KEDA v2.21.0, the Gateway API Inference Extension v1.6.2,
+The version numbers and behaviour described here were checked against the source code of vLLM v0.30.0, Ollama v0.35.1, KEDA v2.21.0, the Gateway API Inference Extension v1.6.2,
 the NVIDIA DRA driver v25.12.0 and Kubernetes 1.37. Where this guide says something was tested,
 Part 8 names the test.
 
@@ -53,7 +52,7 @@ Some of this has not been run end to end. The operator's logic is tested against
 Kubernetes API server, the component that stores every object and checks it on the way in. It has
 not yet run on a cluster with a GPU, the graphics processor that does a model's arithmetic. The
 container image has not been built in CI, the automatic checks that run on every push. `hack/verify.py` checks routing, caching and cost against live vLLM and Ollama, and it has
-not been rerun since the changes of October 2026. Part 10 lists these gaps.
+not been rerun since the latest changes. Part 10 lists these gaps.
 
 This is not a production platform. It is a small, working reference that runs on one 4 GB GPU.
 
@@ -488,7 +487,7 @@ To run the live checks, start vLLM with `hack/serve-vllm.sh` and Ollama on port 
 | `make test-go` | Runs the operator against a real Kubernetes API server and etcd, the database behind it, with no other controllers | Object shapes, field ownership, the selector change, CEL rules and the samples. No pods actually run |
 | `make test-py` | Runs the gateway's routing, cache, client and metrics code; the client tests use a real local web server | Every gateway rule. It does not talk to vLLM or Ollama |
 | `make validate` | Checks the install manifests against the Kubernetes 1.37 schemas, offline | Field names and types. It does not install anything |
-| `make verify` | Sends real requests to live vLLM and Ollama | Routing, streaming, caching and cost end to end. Needs a GPU, and was last run before the October 2026 changes |
+| `make verify` | Sends real requests to live vLLM and Ollama | Routing, streaming, caching and cost end to end. Needs a GPU, and has not been run against the latest changes |
 
 ## Part 9. Design principles
 

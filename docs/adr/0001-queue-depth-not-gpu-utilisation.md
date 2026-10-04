@@ -1,6 +1,6 @@
 # ADR-0001: Autoscale on queue depth, not GPU utilisation
 
-**Status:** Accepted, revised 2026-10 · **Date:** 2026-09
+**Status:** Accepted, revised
 
 ## Context
 

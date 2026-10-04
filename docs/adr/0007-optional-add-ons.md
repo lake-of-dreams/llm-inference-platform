@@ -1,6 +1,6 @@
 # ADR-0007: KEDA and the Inference Extension are optional; the operator reports their absence
 
-**Status:** Accepted · **Date:** 2026-10
+**Status:** Accepted
 
 ## Context
 
