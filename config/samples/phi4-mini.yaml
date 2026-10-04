@@ -1,0 +1,11 @@
+# A local model on Ollama, on CPU. Ollama is not approved for Restricted data.
+apiVersion: serving.platform.io/v1alpha1
+kind: InferenceService
+metadata:
+  name: phi4-mini
+  namespace: llm-platform
+spec:
+  model: phi4-mini
+  backend: Ollama
+  classification: Internal
+  weightLoadSeconds: 900

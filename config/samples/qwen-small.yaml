@@ -1,0 +1,23 @@
+# A small instruct model on vLLM, sized for a 4 GB consumer GPU.
+apiVersion: serving.platform.io/v1alpha1
+kind: InferenceService
+metadata:
+  name: qwen-small
+  namespace: llm-platform
+spec:
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  backend: vLLM
+  classification: Restricted
+  # Installed by the NVIDIA DRA driver.
+  deviceClass: gpu.nvidia.com
+  minDeviceMemory: 3Gi
+  maxModelLen: 2048
+  gpuMemoryUtilization: 85
+  weightLoadSeconds: 300
+  costPerHourMilliUSD: 520
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 3
+    queueDepthTarget: 4
+    ttftP95Milliseconds: 2000
+    kvCacheUsagePercent: 80

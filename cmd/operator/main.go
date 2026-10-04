@@ -24,9 +24,12 @@ func init() {
 }
 
 func main() {
-	var metricsAddr, probeAddr string
+	var metricsAddr, probeAddr, prometheusAddr string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "metrics endpoint")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe endpoint")
+	flag.StringVar(&prometheusAddr, "prometheus-address",
+		"http://prometheus.monitoring.svc.cluster.local:9090",
+		"Prometheus server that KEDA queries for vLLM metrics")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -46,7 +49,7 @@ func main() {
 	}
 
 	if err := (&controller.InferenceServiceReconciler{
-		Client: mgr.GetClient(), Scheme: mgr.GetScheme(),
+		Client: mgr.GetClient(), Scheme: mgr.GetScheme(), PrometheusAddress: prometheusAddr,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller")
 		os.Exit(1)

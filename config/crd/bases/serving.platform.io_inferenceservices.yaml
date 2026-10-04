@@ -1,0 +1,294 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: inferenceservices.serving.platform.io
+spec:
+  group: serving.platform.io
+  names:
+    kind: InferenceService
+    listKind: InferenceServiceList
+    plural: inferenceservices
+    shortNames:
+    - isvc
+    singular: inferenceservice
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.backend
+      name: Backend
+      type: string
+    - jsonPath: .spec.model
+      name: Model
+      type: string
+    - jsonPath: .spec.classification
+      name: Class
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          InferenceService declares one served model. The operator turns it into a
+          Deployment, a Service, a GPU claim template, a KEDA ScaledObject and an
+          InferencePool.
+
+          There is deliberately no scale subresource. A scale subresource would let
+          `kubectl scale` or an autoscaler write the replica count back into this
+          spec, and ADR-0004 keeps the replica count out of the operator's hands.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              InferenceServiceSpec is the desired state of one served model.
+
+              The validation rules below run in the API server. A Restricted model with no
+              deviceClass is rejected before a pod exists, and the rule still holds while
+              the operator is down.
+            properties:
+              autoscaling:
+                default: {}
+                properties:
+                  kvCacheUsagePercent:
+                    default: 80
+                    description: |-
+                      KVCacheUsagePercent is the average KV cache fill per replica above which
+                      the autoscaler adds a replica. A full cache makes vLLM pause requests
+                      before the waiting queue shows it.
+                    format: int32
+                    maximum: 100
+                    minimum: 10
+                    type: integer
+                  maxReplicas:
+                    default: 4
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    default: 1
+                    description: |-
+                      MinReplicas is written to the Deployment once, at creation. After that
+                      the autoscaler owns the replica count. See ADR-0004.
+
+                      The floor is one. Every autoscaling signal comes from a running vLLM
+                      replica, so at zero replicas nothing reports demand and nothing would
+                      ever scale the service back up.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  queueDepthTarget:
+                    default: 4
+                    description: |-
+                      QueueDepthTarget is the number of waiting requests per replica the
+                      autoscaler aims for. Queue depth moves before latency does. GPU
+                      utilisation can fall while requests pile up, because decode is limited
+                      by memory bandwidth. ADR-0001.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  ttftP95Milliseconds:
+                    default: 2000
+                    description: |-
+                      TTFTP95Milliseconds is the latency objective for time to first token at
+                      the 95th percentile. It is a second trigger next to queue depth.
+                    format: int32
+                    minimum: 50
+                    type: integer
+                type: object
+              backend:
+                default: vLLM
+                description: Backend is the serving runtime.
+                enum:
+                - vLLM
+                - Ollama
+                type: string
+              classification:
+                default: Internal
+                description: Classification drives the placement policy at admission.
+                enum:
+                - Public
+                - Internal
+                - Restricted
+                type: string
+              costPerHourMilliUSD:
+                default: 0
+                description: |-
+                  CostPerHourMilliUSD is the marginal cost of one replica in thousandths of
+                  a US dollar per hour. The gateway ranks backends on it.
+                format: int64
+                type: integer
+              deviceClass:
+                description: |-
+                  DeviceClass names a Dynamic Resource Allocation DeviceClass
+                  (resource.k8s.io/v1). The operator creates a ResourceClaimTemplate that
+                  asks for one device of this class. Empty means no accelerator, which only
+                  the Ollama backend can use.
+                type: string
+              gpuMemoryUtilization:
+                default: 85
+                description: GPUMemoryUtilization is the percent of GPU memory vLLM
+                  claims up front.
+                format: int32
+                maximum: 95
+                minimum: 10
+                type: integer
+              maxModelLen:
+                default: 4096
+                description: |-
+                  MaxModelLen caps the context window, and so the KV cache. On a 4 GB card
+                  this is the difference between starting and running out of memory.
+                format: int32
+                minimum: 256
+                type: integer
+              minDeviceMemory:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  MinDeviceMemory is the smallest device memory the claim will accept. The
+                  scheduler then cannot place the pod on a card too small to hold the
+                  weights and the KV cache at this context length. The check reads the
+                  memory capacity the NVIDIA DRA driver publishes.
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              model:
+                description: Model is the Hugging Face ID for vLLM, or the local tag
+                  for Ollama.
+                minLength: 1
+                type: string
+              modelCacheClaimName:
+                description: |-
+                  ModelCacheClaimName names a PersistentVolumeClaim that keeps downloaded
+                  weights across pod restarts. Empty means a scratch volume, so every new
+                  pod downloads the model again.
+                type: string
+              weightLoadSeconds:
+                default: 600
+                description: |-
+                  WeightLoadSeconds sizes the startupProbe budget. Set it too low and the
+                  liveness probe fires mid-load and restarts the container forever, with a
+                  clean application log. See ADR-0002.
+                format: int32
+                minimum: 10
+                type: integer
+            required:
+            - model
+            type: object
+            x-kubernetes-validations:
+            - message: Restricted classification requires an explicit deviceClass
+              rule: self.classification != 'Restricted' || (has(self.deviceClass)
+                && size(self.deviceClass) > 0)
+            - message: Ollama backend is not approved for Restricted data
+              rule: self.backend != 'Ollama' || self.classification != 'Restricted'
+            - message: 'vLLM backend requires a deviceClass: the vLLM image is built
+                for CUDA and does not serve on CPU'
+              rule: self.backend != 'vLLM' || (has(self.deviceClass) && size(self.deviceClass)
+                > 0)
+            - message: minDeviceMemory only applies with a deviceClass
+              rule: '!has(self.minDeviceMemory) || (has(self.deviceClass) && size(self.deviceClass)
+                > 0)'
+            - message: maxReplicas must be >= minReplicas
+              rule: '!has(self.autoscaling) || self.autoscaling.maxReplicas >= self.autoscaling.minReplicas'
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              endpoint:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                type: string
+              readyReplicas:
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

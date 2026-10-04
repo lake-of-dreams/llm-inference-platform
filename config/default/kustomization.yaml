@@ -1,0 +1,8 @@
+# Everything the operator needs: its CRD, its permissions and its own
+# Deployment. KEDA, the NVIDIA DRA driver and the Inference Extension CRDs are
+# installed separately; the operator works without the last two and reports
+# their absence in each InferenceService's status.
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager

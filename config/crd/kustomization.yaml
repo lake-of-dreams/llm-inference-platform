@@ -1,0 +1,2 @@
+resources:
+  - bases/serving.platform.io_inferenceservices.yaml

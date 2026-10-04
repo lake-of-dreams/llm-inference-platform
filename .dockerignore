@@ -1,0 +1,7 @@
+.git
+.venv
+bin
+gateway
+hack
+docs
+config
