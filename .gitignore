@@ -6,3 +6,4 @@ bin/
 /tmp/
 *.log
 models/
+*.egg-info/
