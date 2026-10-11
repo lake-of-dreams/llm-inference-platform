@@ -40,3 +40,11 @@ jobs:
       # kubectl --dry-run=client still fetches the OpenAPI schema from a live
       # server, so it cannot run here. kubeconform validates offline.
       - run: make validate
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The image is what a cluster runs. Building it here catches a Dockerfile
+      # that drifts from the code, such as a new package not copied in.
+      - run: docker build -t inference-operator:ci .

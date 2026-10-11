@@ -52,4 +52,9 @@ operator never does that, since `minReplicas` is at least one.
   flag, `--prometheus-address`. Installing Prometheus where the flag points, or pointing the flag at
   an existing one, is a cluster decision.
 * Only the scheduler's verdict is surfaced. A pod that schedules and then crashes while loading
-  weights still shows `Loading` until its startup probe gives up (ADR-0002).
+  weights still shows `Loading` until its startup probe gives up (ADR-0002). **Closed:** a container
+  waiting in a crash loop, an image pull failure or a configuration error now gives phase `Failing`,
+  with the waiting reason and the last exit, such as `OOMKilled, code 137`.
+  `TestCrashingContainerIsReportedWithItsLastExit` holds it, and
+  `TestCreatingContainerStillReadsAsLoading` keeps a container that is merely being created at
+  `Loading`.

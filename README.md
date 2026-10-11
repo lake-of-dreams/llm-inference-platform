@@ -41,18 +41,27 @@ each request to a machine that is allowed to see it.
 
 ## A note on accuracy
 
-The version numbers and behaviour described here were checked against the source code of vLLM v0.31.0, Ollama v0.40.3, KEDA v2.21.0, the Gateway API Inference Extension v1.6.2,
-the NVIDIA DRA driver v25.12.0 and Kubernetes 1.37. Where this guide says something was tested,
-Part 8 names the test.
+The behaviour described here was checked against the source code of vLLM v0.31.0, KEDA v2.21.0,
+the Gateway API Inference Extension v1.6.2, the NVIDIA DRA driver v25.12.0 and Kubernetes 1.37. The
+operator runs vLLM v0.31.0 and Ollama v0.35.1. Where this guide says something was tested, Part 8
+names the test.
 
 The guide simplifies how a model computes an answer. It describes the two phases at the level
 needed to understand the scaling decisions, and no deeper.
 
-Some of this has not been run end to end. The operator's logic is tested against a real
-Kubernetes API server, the component that stores every object and checks it on the way in. It has
-not yet run on a cluster with a GPU, the graphics processor that does a model's arithmetic. The
-container image has not been built in CI, the automatic checks that run on every push. `hack/verify.py` checks routing, caching and cost against live vLLM and Ollama, and it has
-not been rerun since the latest changes. Part 10 lists these gaps.
+What has run, and where:
+
+* The operator's logic is tested against a real Kubernetes API server, the component that stores
+  every object and checks it on the way in.
+* The operator has run on a three-node kind cluster on a laptop, Kubernetes 1.35, with KEDA and no
+  GPU inside the cluster. The Ollama service served a request; the vLLM service could not be
+  scheduled, as expected. It has not run on a cluster with a GPU, the graphics processor that does a
+  model's arithmetic.
+* `hack/verify.py` has run against vLLM v0.29.0 on the laptop's 4 GB GPU and the laptop's own
+  Ollama, v0.9.2. Every check passed.
+* CI, the automatic checks that run on every push, builds the operator image.
+
+Part 10 lists what is still open.
 
 This is not a production platform. It is a small, working reference that runs on one 4 GB GPU.
 
@@ -198,6 +207,7 @@ scheduler cannot place shows as `Unschedulable` with the scheduler's reason, not
 |---|---|---|
 | Phase `Loading` | Pods exist and are starting; weights may take minutes | `phi4-mini` while Ollama pulled its model |
 | Phase `Unschedulable` | No node can take the pod; the reason is the scheduler's | `qwen-small`: "device class gpu.nvidia.com does not exist" |
+| Phase `Failing` | A pod was placed but its container will not start: a crash loop, a failed image pull | A model name Ollama cannot pull |
 | Phase `Ready` | At least one replica is serving | `phi4-mini`, which then answered a chat request |
 | `Autoscaling=False`, `ScalerNotReady` | KEDA has the ScaledObject but says its triggers do not work | Prometheus was not at the configured address |
 | `Autoscaling=Unknown`, `WaitingForKEDA` | KEDA has not reported on the ScaledObject yet | Briefly, right after creation |
@@ -518,6 +528,27 @@ salts, the contracts user's request carries a different salt, finds no cached no
 600 ms like any new text. HR's own requests still share notes with each other, because they carry
 the same salt. ADR-0008 records the decision.
 
+### 7.6 One request, end to end, and the answer cache that crossed teams
+
+The router, the answer cache, the salt and the ledger each work alone. `Gateway.handle` in
+`gateway/app/gateway.py` runs them together for one request, and it is the one place that requires
+a tenant. Step by step:
+
+1. A request with no tenant is refused, before anything else.
+2. The router chooses a backend, or refuses (7.1).
+3. The answer cache is searched in the request's own scope.
+4. On a miss, the backend is called with the tenant's salt (7.5), and the answer is cached.
+5. The call is recorded in the ledger under the tenant, at zero cost if it came from the cache.
+
+Writing this exposed a leak. The answer cache was divided by classification (7.2) but not by
+tenant, so two teams at the same classification shared cached answers.
+
+**Example.** HR asks "summarise the payroll file", marked Internal, and the answer is cached. A
+contracts user sends the same words, also Internal. Before the fix, the contracts user received
+HR's summary from the cache: the whole answer, not a timing hint. The cache scope now includes the
+tenant, and the contracts request goes to the model. The ledger can now also say what each team
+spent. ADR-0010 records the change, and Guide 4 walks through it.
+
 ## Part 8. Running it yourself
 
 Everything in this part runs on a laptop except the live GPU checks. Each check in 8.3 says what it
@@ -601,14 +632,15 @@ Extension and says so in status (Part 2).
 
 The reasoning behind each decision is in `docs/adr/`.
 
-Three guides in `docs/guides/` teach one subject each from zero, with Fernhill as the running
+Four guides in `docs/guides/` teach one subject each from zero, with Fernhill as the running
 example and real measurements from the laptop GPU:
 
 | Guide | Plain meaning |
 |---|---|
 | `01-cost-per-answer-from-zero.md` | Why an hourly price does not tell you what an answer costs, and how the router prices per token |
 | `02-prefix-caching-and-timing-from-zero.md` | How the model server's memory of earlier prompts leaks across teams, and how a keyed salt stops it |
-| `03-an-operator-on-a-real-cluster-from-zero.md` | The operator's first run on a real cluster, and the two wrong status answers it exposed |
+| `03-an-operator-on-a-real-cluster-from-zero.md` | The operator's first run on a real cluster, the wrong status answers it exposed, and crash loops reported as they happen |
+| `04-one-request-through-the-gateway-from-zero.md` | The five steps one request takes through the gateway, and the answer cache that crossed teams |
 
 | Record | Plain meaning |
 |---|---|
@@ -621,6 +653,7 @@ example and real measurements from the laptop GPU:
 | ADR-0007 | Treat KEDA and the Inference Extension as optional, and report their absence |
 | ADR-0008 | Salt vLLM's prefix cache per tenant and classification, with a keyed hash |
 | ADR-0009 | Report KEDA's and the scheduler's verdicts in status, not the operator's own actions |
+| ADR-0010 | One entry point per request, and an answer cache divided by tenant |
 
 ## Part 10. What is unresolved
 
@@ -631,7 +664,6 @@ person who owns the platform.
   reached `Ready` and answered a request, and the vLLM sample correctly reports `Unschedulable`,
   because kind here has no NVIDIA runtime or DRA driver. A vLLM pod has still never started under
   the operator.
-* **The image is built by hand.** `make deploy` built and loaded it into kind. CI does not build it.
 * **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
   laptop cluster nothing listened there, and the status now says so (ADR-0009).
 * **`make verify` has run on vLLM v0.29.0, not yet v0.31.0.** Every check passed on the laptop GPU, including the salt and its control. The operator pins v0.31.0, so the check is to be repeated there.
@@ -642,10 +674,10 @@ person who owns the platform.
 * **Throughput figures are typed in.** Cost per token needs each backend's busy throughput, which
   someone measures with a load test and enters. A figure that goes stale after a model or card
   change misprices that backend until it is measured again (ADR-0005).
-* **Nothing sets the tenant yet.** `prefix_cache_salt` needs the caller's tenant, but the gateway
-  has no sign-in step to read it from. Until one exists, the caller of `complete` must pass the
-  salt. The gateway's secret key also needs a home and a rotation plan; rotating it empties every
-  group's prefix cache once (ADR-0008).
+* **The tenant must come from a verified identity.** `Gateway.handle` requires a tenant, but the
+  gateway has no network front end or sign-in. Whatever calls it must read the tenant from a
+  verified identity, never from a header the caller writes (ADR-0010). The gateway's secret key also
+  needs a home and a rotation plan; rotating it empties every group's prefix cache once (ADR-0008).
 * **The cache's embedder.** The default compares words, not meaning. The 0.93 threshold has not
   been tuned against a real embedding model (ADR-0006).
 * **Model-aware routing.** The InferencePool is created, but routing through llm-d's endpoint

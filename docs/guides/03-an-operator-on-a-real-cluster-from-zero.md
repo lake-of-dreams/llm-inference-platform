@@ -21,7 +21,8 @@ now reports what the cluster says rather than what the operator did.
 5. Part 5 explains the first wrong answer: autoscaling that did not work.
 6. Part 6 explains the second wrong answer: weights that were never loading.
 7. Part 7 explains a smaller finding: a warning on every apply.
-8. Part 8 shows the fixed status, and the request that proved a pod could serve.
+8. Part 8 shows the fixed status, the request that proved a pod could serve, and a crash reported
+   as it happened.
 9. Part 9 lists the design principles.
 10. Part 10 lists what is unresolved.
 
@@ -295,6 +296,41 @@ OK   {'prompt_tokens': 8, 'completion_tokens': 2, 'total_tokens': 10}
 
 That was the first request ever served by a pod this operator created.
 
+### 8.3 A pod that was placed and then crashed
+
+Part 6 handled a pod the scheduler could not place. A pod can also be placed, start, and then crash:
+out of memory while loading weights, or a model the server cannot fetch. Until the startup probe
+gave up, the operator still said `WeightsLoading`, and the reason for the crash was only in the pod.
+
+The operator now also reads each container's state while nothing is ready. A container waiting in a
+crash loop, an image pull failure or a configuration error gives the phase `Failing`. The condition
+quotes the waiting reason and the container's last exit, which is where the cause actually is.
+
+| Container is waiting because | Plain meaning | Phase |
+|---|---|---|
+| `ContainerCreating` | The kubelet is still setting it up | `Loading` |
+| `CrashLoopBackOff` | It started and exited, repeatedly; the kubelet is waiting before the next try | `Failing` |
+| `ImagePullBackOff`, `ErrImagePull` | The image could not be downloaded | `Failing` |
+| `CreateContainerConfigError` | Its configuration refers to something missing, such as a secret | `Failing` |
+
+To see it on the cluster, Fernhill applied an Ollama service for a model that does not exist,
+`no-such-model-xyz`. The container's start script runs `ollama pull`, which fails and exits. About a
+minute later:
+
+```
+missing-model   phase Failing
+  Ready=False   CrashLoopBackOff: container ollama: CrashLoopBackOff: back-off 40s restarting
+                failed container=ollama ... (last exit: Error, code 1, 3 restarts)
+```
+
+*Figure 3. A crash loop reported as it happens. Look at the end: the last exit and the restart
+count, which say this is a real failure and not a slow start.*
+
+A container that runs out of memory exits with `OOMKilled, code 137`, and the same message carries
+it. `TestCrashingContainerIsReportedWithItsLastExit` checks exactly that case, and
+`TestCreatingContainerStillReadsAsLoading` makes sure a container that is merely being created is
+not called a failure.
+
 ## Part 9. Design principles
 
 **1. Report what happened, not what you did.** Storing an object is not the same as it working.
@@ -317,9 +353,11 @@ cluster before believing any status that depends on them.
    the NVIDIA DRA driver installed. The laptop's GPU is not visible inside kind.
 2. **Prometheus is a cluster decision.** The operator reports that KEDA cannot reach Prometheus. It
    cannot install one, and should not. The address is the `--prometheus-address` start-up flag.
-3. **Crashes after scheduling.** A pod that is placed and then crashes while loading shows `Loading`
-   until its startup probe gives up. Surfacing the container's own last error would close that.
-4. **The image is built by hand.** `make deploy` built it here. CI does not build it.
+3. **A slow start that never ends.** A container that stays up but never becomes ready, without
+   crashing, still shows `Loading` until its startup probe gives up. Only the probe's time budget
+   tells a slow load from a hung one (ADR-0002).
+4. **CI builds the image but does not run it.** A job builds the operator image on every push.
+   Nothing in CI runs it in a cluster; that is still done by hand with `make deploy`.
 
 ## Glossary
 
@@ -327,6 +365,7 @@ cluster before believing any status that depends on them.
 |---|---|---|
 | API server | The Kubernetes component that stores every object and checks it on the way in | Part 3.1 |
 | Condition | A named statement in status, `True`, `False` or `Unknown`, with a reason | Part 2.2 |
+| CrashLoopBackOff | A container that keeps exiting; the kubelet waits longer before each restart | Part 8.3 |
 | CRD (CustomResourceDefinition) | The definition of a new kind of Kubernetes object | Part 1.1 |
 | Declarative | Describing the state you want and letting programs make it true | Part 1.1 |
 | Deployment | The Kubernetes object that runs and replaces copies of a program | Part 1.2 |
