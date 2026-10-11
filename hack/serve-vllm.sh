@@ -16,7 +16,8 @@ set -euo pipefail
 # PyTorch sampler instead. See docs/adr/0003-flashinfer-sampler.md
 export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 
-exec "$(dirname "$0")/../.venv/bin/vllm" serve "${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}" \
+# VLLM_BIN points at a vllm installed elsewhere, such as a shared GPU venv.
+exec "${VLLM_BIN:-$(dirname "$0")/../.venv/bin/vllm}" serve "${MODEL:-Qwen/Qwen2.5-0.5B-Instruct}" \
   --host 0.0.0.0 --port "${PORT:-8001}" \
   --max-model-len "${MAX_LEN:-2048}" \
   --gpu-memory-utilization "${GPU_UTIL:-0.85}" \

@@ -48,6 +48,12 @@ Evidence: five tests in `gateway/tests/test_router.py`, from
 `test_same_hourly_price_faster_replica_is_cheaper_per_answer` to
 `test_local_backend_is_free_per_token_too`. Ranking by hourly price again fails three of them.
 
+Measured on the laptop GPU, the first single burst on a just-started server gave 92 tokens a
+second and the next 434: the first concurrent batch pays one-off start-up work. Typed in, the cold
+figure would have priced the GPU 4.7 times too high. `hack/verify.py` now sends one uncounted
+warm-up burst, then three measured bursts, takes the median and fails if they disagree by more than
+a factor of two. Warmed, the bursts gave 467, 421 and 405 tokens a second.
+
 ## Open questions
 
 * The throughput figure is entered by hand. It goes stale when the model, the card or the vLLM

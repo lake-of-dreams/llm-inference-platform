@@ -564,7 +564,7 @@ To run the live checks, start vLLM with `hack/serve-vllm.sh` and Ollama on port 
 | `make test-py` | Runs the gateway's routing, cache, client and metrics code; the client tests use a real local web server | Every gateway rule. It does not talk to vLLM or Ollama |
 | `make validate` | Checks the install manifests against the Kubernetes 1.37 schemas, offline | Field names and types. It does not install anything |
 | `make deploy` and `make samples` | Builds the operator image, runs it in a kind cluster and applies the two samples | The operator's real behaviour with a scheduler, KEDA and a kubelet. On a laptop with no GPU driver in kind, the vLLM sample can only reach `Unschedulable` |
-| `make verify` | Sends real requests to live vLLM and Ollama | Routing, streaming, caching and cost end to end. Needs a GPU, and has not been run against the latest changes |
+| `make verify` | Sends real requests to live vLLM and Ollama | Routing, streaming, caching and cost end to end, the prefix cache salt with a control that shows the leak it closes, and a warmed-up throughput measurement. Needs a GPU |
 
 ## Part 9. Design principles
 
@@ -601,6 +601,15 @@ Extension and says so in status (Part 2).
 
 The reasoning behind each decision is in `docs/adr/`.
 
+Three guides in `docs/guides/` teach one subject each from zero, with Fernhill as the running
+example and real measurements from the laptop GPU:
+
+| Guide | Plain meaning |
+|---|---|
+| `01-cost-per-answer-from-zero.md` | Why an hourly price does not tell you what an answer costs, and how the router prices per token |
+| `02-prefix-caching-and-timing-from-zero.md` | How the model server's memory of earlier prompts leaks across teams, and how a keyed salt stops it |
+| `03-an-operator-on-a-real-cluster-from-zero.md` | The operator's first run on a real cluster, and the two wrong status answers it exposed |
+
 | Record | Plain meaning |
 |---|---|
 | ADR-0001 | Scale on waiting requests, cache fill and first-token latency, not GPU utilisation |
@@ -625,7 +634,7 @@ person who owns the platform.
 * **The image is built by hand.** `make deploy` built and loaded it into kind. CI does not build it.
 * **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
   laptop cluster nothing listened there, and the status now says so (ADR-0009).
-* **`make verify` predates these changes.** The live check needs rerunning against vLLM v0.31.0, with the cache salt sent.
+* **`make verify` has run on vLLM v0.29.0, not yet v0.31.0.** Every check passed on the laptop GPU, including the salt and its control. The operator pins v0.31.0, so the check is to be repeated there.
 * **FlashInfer on the new vLLM.** The operator does not turn off the FlashInfer sampler on the pods
   it creates. Whether v0.31.0 still fails on Fernhill's card is untested (ADR-0003).
 * **Scale-to-zero.** It needs a demand signal that exists with no replicas running, such as a

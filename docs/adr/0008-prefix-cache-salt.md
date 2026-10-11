@@ -45,5 +45,8 @@ source, so a salt can no longer collide with a LoRA adapter's name.
 * The gateway has no sign-in step, so nothing yet supplies the tenant. Whoever calls `complete`
   must compute and pass the salt.
 * Where the key lives and how it rotates is not decided.
-* The salt has not been sent to a running vLLM v0.31.0 here. The field and its limits come from
-  the source, and the test checks what the gateway sends, not what vLLM does with it.
+* Measured on a running vLLM v0.29.0, not yet v0.31.0. `hack/verify.py` section 5 reads vLLM's
+  `vllm:prefix_cache_hits` counter around each call: the same group reused 336 tokens of a
+  403-token prompt, a different group sending the same text reused 0, and a control with no salt
+  reused 336, which shows the leak is real on that server. Timing barely moved on a 0.5B model, so
+  the counter is the evidence, not the latency.
