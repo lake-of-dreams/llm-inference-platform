@@ -190,6 +190,21 @@ is the monitoring system that collects the metrics vLLM publishes.
 KEDA and the Inference Extension are optional. If either is not installed, the operator still
 builds the rest, and the InferenceService's status says what is missing. ADR-0007 records why.
 
+The status reports what the cluster says, not what the operator did. Applying a ScaledObject only
+proves the API server stored it. So the operator reads KEDA's own verdict back, and a pod the
+scheduler cannot place shows as `Unschedulable` with the scheduler's reason, not as loading.
+
+| Phase or condition | Plain meaning | Seen on a laptop cluster with no GPU |
+|---|---|---|
+| Phase `Loading` | Pods exist and are starting; weights may take minutes | `phi4-mini` while Ollama pulled its model |
+| Phase `Unschedulable` | No node can take the pod; the reason is the scheduler's | `qwen-small`: "device class gpu.nvidia.com does not exist" |
+| Phase `Ready` | At least one replica is serving | `phi4-mini`, which then answered a chat request |
+| `Autoscaling=False`, `ScalerNotReady` | KEDA has the ScaledObject but says its triggers do not work | Prometheus was not at the configured address |
+| `Autoscaling=Unknown`, `WaitingForKEDA` | KEDA has not reported on the ScaledObject yet | Briefly, right after creation |
+
+ADR-0009 records how running the operator on a real cluster found both of the wrong answers this
+table replaced.
+
 ### 2.3 Who does what, and why
 
 Several programs make decisions in this system. Some of the decisions follow fixed rules and
@@ -548,6 +563,7 @@ To run the live checks, start vLLM with `hack/serve-vllm.sh` and Ollama on port 
 | `make test-go` | Runs the operator against a real Kubernetes API server and etcd, the database behind it, with no other controllers | Object shapes, field ownership, the selector change, CEL rules and the samples. No pods actually run |
 | `make test-py` | Runs the gateway's routing, cache, client and metrics code; the client tests use a real local web server | Every gateway rule. It does not talk to vLLM or Ollama |
 | `make validate` | Checks the install manifests against the Kubernetes 1.37 schemas, offline | Field names and types. It does not install anything |
+| `make deploy` and `make samples` | Builds the operator image, runs it in a kind cluster and applies the two samples | The operator's real behaviour with a scheduler, KEDA and a kubelet. On a laptop with no GPU driver in kind, the vLLM sample can only reach `Unschedulable` |
 | `make verify` | Sends real requests to live vLLM and Ollama | Routing, streaming, caching and cost end to end. Needs a GPU, and has not been run against the latest changes |
 
 ## Part 9. Design principles
@@ -577,7 +593,10 @@ answer, so the router compares cost per token wherever throughput is known (Part
 **7. Every cache is divided along the same lines.** The gateway's own cache and vLLM's prefix cache
 both stop at a classification and tenant boundary (Part 7).
 
-**8. Missing add-ons are reported, not fatal.** The operator runs without KEDA or the Inference
+**8. Status says what happened, not what was attempted.** KEDA's verdict and the scheduler's reason
+are read back and reported (Part 2).
+
+**9. Missing add-ons are reported, not fatal.** The operator runs without KEDA or the Inference
 Extension and says so in status (Part 2).
 
 The reasoning behind each decision is in `docs/adr/`.
@@ -592,16 +611,20 @@ The reasoning behind each decision is in `docs/adr/`.
 | ADR-0006 | Divide the semantic cache by classification, model and sampling settings |
 | ADR-0007 | Treat KEDA and the Inference Extension as optional, and report their absence |
 | ADR-0008 | Salt vLLM's prefix cache per tenant and classification, with a keyed hash |
+| ADR-0009 | Report KEDA's and the scheduler's verdicts in status, not the operator's own actions |
 
 ## Part 10. What is unresolved
 
 These are the known gaps. Each needs either a test on real hardware or a decision from the
 person who owns the platform.
 
-* **No GPU cluster run yet.** The operator has been tested against a real API server, but not on a
-  cluster with a GPU, the NVIDIA DRA driver and KEDA together. The first such run will be the
-  first time pods actually start under the operator.
-* **The image has not been built.** The Dockerfile and `make deploy` have not run in CI or here.
+* **No GPU inside the cluster yet.** The operator has run on a kind cluster: the Ollama sample
+  reached `Ready` and answered a request, and the vLLM sample correctly reports `Unschedulable`,
+  because kind here has no NVIDIA runtime or DRA driver. A vLLM pod has still never started under
+  the operator.
+* **The image is built by hand.** `make deploy` built and loaded it into kind. CI does not build it.
+* **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
+  laptop cluster nothing listened there, and the status now says so (ADR-0009).
 * **`make verify` predates these changes.** The live check needs rerunning against vLLM v0.31.0, with the cache salt sent.
 * **FlashInfer on the new vLLM.** The operator does not turn off the FlashInfer sampler on the pods
   it creates. Whether v0.31.0 still fails on Fernhill's card is untested (ADR-0003).
