@@ -69,7 +69,7 @@ version filtered on a name the operator never set, so the queries matched nothin
 ## Evidence
 
 The metric names were checked in the vLLM v0.30.0 source (`vllm/v1/metrics/loggers.py`), which
-also shows the `model_name` label. The trigger shapes are checked against the KEDA v2.21.0
+also shows the `model_name` label, and again in v0.31.0, where they are unchanged. The trigger shapes are checked against the KEDA v2.21.0
 ScaledObject CRD in `internal/controller/inferenceservice_controller_test.go`.
 
 ## Open questions

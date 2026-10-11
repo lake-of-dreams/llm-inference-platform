@@ -20,7 +20,7 @@ tests and deploy it yourself.
 4. Part 4 covers starting a model without Kubernetes killing it.
 5. Part 5 covers scaling on the signal that moves first.
 6. Part 6 covers who owns the replica count, and why that needs care.
-7. Part 7 covers choosing a backend for each request, caching answers, and attributing cost.
+7. Part 7 covers choosing a backend for each request, caching answers, comparing cost per answer, keeping one caller group's cached prompts from another, and attributing cost.
 8. Part 8 shows how to run and test it.
 9. Part 9 states the design principles and lists the decision records.
 10. Part 10 lists what is unresolved.
@@ -41,7 +41,7 @@ each request to a machine that is allowed to see it.
 
 ## A note on accuracy
 
-The version numbers and behaviour described here were checked against the source code of vLLM v0.30.0, Ollama v0.35.1, KEDA v2.21.0, the Gateway API Inference Extension v1.6.2,
+The version numbers and behaviour described here were checked against the source code of vLLM v0.31.0, Ollama v0.40.3, KEDA v2.21.0, the Gateway API Inference Extension v1.6.2,
 the NVIDIA DRA driver v25.12.0 and Kubernetes 1.37. Where this guide says something was tested,
 Part 8 names the test.
 
@@ -396,7 +396,8 @@ The router in `gateway/app/router.py` filters the backends in a fixed order.
 2. It removes backends that lack a capability the request needs, or whose context window is too
    small. The **context window** is the most text the model can consider at once.
 3. It removes backends whose p95 time to first token is over the request's latency budget.
-4. It picks the cheapest of what is left.
+4. It picks the cheapest of what is left. It compares cost per answer where it can, and falls back
+   to price per hour where it cannot (7.4).
 
 If nothing is left, it raises an error rather than quietly using a weaker backend.
 
@@ -441,6 +442,66 @@ charged four times what the GPU cost for those 3 seconds. Ollama calls cost zero
 
 The gateway streams answers, so it records the time to first token for each call as well as the
 total time.
+
+### 7.4 Comparing cost per answer, not per hour
+
+An hourly price says what a replica costs to keep running. It does not say what an answer costs,
+because replicas differ in how many tokens they produce in that hour. The router therefore compares
+**cost per million generated tokens**: the hourly price divided by the tokens a replica produces
+in an hour.
+
+The tokens a replica produces depend on how busy it is. The router uses the **throughput** a
+replica sustains when busy, measured once with a load test such as `vllm bench serve` and set as
+`tokens_per_second` on the backend. It does not use the rate Prometheus observes. An idle replica
+produces almost no tokens, so its observed cost per token would look enormous at exactly the moment
+it has the most room.
+
+**Example.** Fernhill considers renting a second GPU for contract work. Two offers pass the first
+three filters.
+
+| Offer | Price per hour | Busy throughput | Cost per million tokens |
+|---|---|---|---|
+| Older card | 520 thousandths of a dollar | 100 tokens a second | 520 / (100 × 3,600) × 1,000,000 = 1,444 |
+| Newer card | 800 thousandths of a dollar | 400 tokens a second | 800 / (400 × 3,600) × 1,000,000 = 556 |
+
+The older card is cheaper by the hour and costs 2.6 times as much per answer. Ranked by hourly
+price, the router would pick the older card. Ranked per token, it picks the newer one.
+
+A backend with no throughput figure cannot be priced per answer. The router ranks it after every
+backend that can be, and ranks such backends among themselves by hourly price, as before. The
+routing reason names the basis it used, so "why did this go there" stays answerable. ADR-0005
+records the change.
+
+### 7.5 The model server's own cache, and why it is salted
+
+Part 1 explained the KV cache: the model's working notes on everything it has read. vLLM keeps
+these notes after a request finishes. If a new request starts with exactly the same text, such as
+the same long system prompt or the same contract, vLLM reuses the notes instead of reading that
+text again. This is called **prefix caching**, and it makes the first word of the answer arrive
+sooner.
+
+That speed can be measured by whoever sent the request, and that is the problem. Suppose a caller
+from one group guesses the opening of a document another group uses and sends it. A fast first word
+means somebody already sent that text. Learning a secret from how long something takes is called a
+**timing side channel**.
+
+vLLM lets each request carry a **cache salt**, a string mixed into the cache's fingerprint for the
+first block of text. Only requests with the same salt can reuse each other's notes. The gateway
+computes one salt for each pair of tenant, the group a caller belongs to, and classification, in
+`prefix_cache_salt` in `gateway/app/cache.py`. It sends the salt only to backends marked as
+accepting one, which today means vLLM.
+
+The salt is not the group's name. It is an HMAC, a keyed fingerprint, of the tenant and
+classification under a secret that only the gateway holds. Anyone who can reach vLLM directly can
+send whatever salt they like. A salt that could be guessed would let them join another group's
+cache.
+
+**Example.** Fernhill's HR team and its contracts team both use vLLM. HR's payroll prompts start
+with the same 1,500-token instruction. Without salts, a contracts user who obtained that instruction
+could send it and see a first word in 80 ms instead of 600 ms, which confirms HR is using it. With
+salts, the contracts user's request carries a different salt, finds no cached notes, and takes
+600 ms like any new text. HR's own requests still share notes with each other, because they carry
+the same salt. ADR-0008 records the decision.
 
 ## Part 8. Running it yourself
 
@@ -510,7 +571,13 @@ an error. A quiet substitution gives the caller results it cannot compare with y
 **5. A cache sits behind the boundary it serves.** An answer is only reused for a caller who could
 have received it from the router (Part 7).
 
-**6. Missing add-ons are reported, not fatal.** The operator runs without KEDA or the Inference
+**6. Compare what an answer costs.** Two replicas at the same hourly price can differ fourfold per
+answer, so the router compares cost per token wherever throughput is known (Part 7).
+
+**7. Every cache is divided along the same lines.** The gateway's own cache and vLLM's prefix cache
+both stop at a classification and tenant boundary (Part 7).
+
+**8. Missing add-ons are reported, not fatal.** The operator runs without KEDA or the Inference
 Extension and says so in status (Part 2).
 
 The reasoning behind each decision is in `docs/adr/`.
@@ -524,6 +591,7 @@ The reasoning behind each decision is in `docs/adr/`.
 | ADR-0005 | Route on classification, then capability, then latency, then cost |
 | ADR-0006 | Divide the semantic cache by classification, model and sampling settings |
 | ADR-0007 | Treat KEDA and the Inference Extension as optional, and report their absence |
+| ADR-0008 | Salt vLLM's prefix cache per tenant and classification, with a keyed hash |
 
 ## Part 10. What is unresolved
 
@@ -534,13 +602,18 @@ person who owns the platform.
   cluster with a GPU, the NVIDIA DRA driver and KEDA together. The first such run will be the
   first time pods actually start under the operator.
 * **The image has not been built.** The Dockerfile and `make deploy` have not run in CI or here.
-* **`make verify` predates these changes.** The live check needs rerunning against vLLM v0.30.0.
+* **`make verify` predates these changes.** The live check needs rerunning against vLLM v0.31.0, with the cache salt sent.
 * **FlashInfer on the new vLLM.** The operator does not turn off the FlashInfer sampler on the pods
-  it creates. Whether v0.30.0 still fails on Fernhill's card is untested (ADR-0003).
+  it creates. Whether v0.31.0 still fails on Fernhill's card is untested (ADR-0003).
 * **Scale-to-zero.** It needs a demand signal that exists with no replicas running, such as a
   queue length reported by the gateway (ADR-0001).
-* **Cost per token.** The router ranks backends by hourly price. Two backends with the same price
-  and different speed cost different amounts per answer (ADR-0005).
+* **Throughput figures are typed in.** Cost per token needs each backend's busy throughput, which
+  someone measures with a load test and enters. A figure that goes stale after a model or card
+  change misprices that backend until it is measured again (ADR-0005).
+* **Nothing sets the tenant yet.** `prefix_cache_salt` needs the caller's tenant, but the gateway
+  has no sign-in step to read it from. Until one exists, the caller of `complete` must pass the
+  salt. The gateway's secret key also needs a home and a rotation plan; rotating it empties every
+  group's prefix cache once (ADR-0008).
 * **The cache's embedder.** The default compares words, not meaning. The 0.93 threshold has not
   been tuned against a real embedding model (ADR-0006).
 * **Model-aware routing.** The InferencePool is created, but routing through llm-d's endpoint
@@ -554,11 +627,13 @@ person who owns the platform.
 |---|---|---|
 | ADR | Architecture decision record: a short note of one decision and why it was made | Part 9 |
 | API server | The Kubernetes component that stores every object and checks it on the way in | A note on accuracy, Part 2.1 |
+| Cache salt | A string mixed into vLLM's prefix cache so that only requests carrying the same salt share cached work | Part 7.5 |
 | CEL | Common Expression Language, the rule language the API server runs to check objects | Part 2.1 |
 | CI | Continuous integration: the automatic checks that run on every push | A note on accuracy, Part 8.2 |
 | Classification | How sensitive a request's data is: Public, Internal or Restricted | Part 2.1, Part 7.1 |
 | ClusterRole | The list of objects the operator is allowed to read and change | Part 8.2 |
 | Context window | The most text a model can consider at once | Part 7.1 |
+| Cost per million tokens | The hourly price divided by the tokens a replica generates in an hour when busy, times a million | Part 7.4 |
 | CrashLoopBackOff | Kubernetes' status for a container that keeps failing and being restarted | Part 4.1 |
 | CRD | CustomResourceDefinition: the definition of a new kind of Kubernetes object | Part 2.1 |
 | Decode | The phase where the model writes its answer one token at a time; limited by memory bandwidth | Part 1.1 |
@@ -572,6 +647,7 @@ person who owns the platform.
 | Gateway | The program that receives each request and chooses a backend for it | Part 2.4, Part 7 |
 | Gateway API Inference Extension | A Kubernetes project that lets a gateway route model traffic to the best replica | Part 2.2 |
 | GPU | The graphics processor that does a model's arithmetic | A note on accuracy, Part 1.1 |
+| HMAC | A keyed fingerprint: only someone holding the secret key can produce or predict it | Part 7.5 |
 | InferencePool | An object from the Gateway API Inference Extension listing the pods that serve a model | Part 2.2 |
 | InferenceService | This repository's object: a description of one model to serve | Part 2.1 |
 | JSON | A structured text format that other programs can read | Part 7.1 |
@@ -586,6 +662,7 @@ person who owns the platform.
 | p95 | The value that 95 in 100 measurements stay under | Part 5.2 |
 | Pod | A group of containers that Kubernetes schedules together | Part 2.2 |
 | Prefill | The phase where the model reads the whole request at once; limited by arithmetic | Part 1.1 |
+| Prefix caching | Reusing the model's working notes for text that starts the same as an earlier request | Part 7.5 |
 | Probe | A small check the kubelet runs on a container on a timer | Part 4.1 |
 | Prometheus | The monitoring system that collects the metrics vLLM publishes | Part 2.2 |
 | Readiness probe | A check that removes a pod from the Service while it is not answering | Part 4.1 |
@@ -600,6 +677,9 @@ person who owns the platform.
 | Service | A stable network address that spreads requests across ready pods | Part 2.2 |
 | Startup probe | A check that runs first and holds off the other probes until the program has started | Part 4.1 |
 | Temperature | The amount of randomness allowed in a model's answer | Part 7.2 |
+| Tenant | The group a caller belongs to, whose cached work is kept apart from other groups' | Part 7.5 |
+| Throughput | Tokens a replica generates per second when it is busy, measured with a load test | Part 7.4 |
+| Timing side channel | Learning a secret from how long something takes rather than from what it returns | Part 7.5 |
 | Token | A word or piece of a word; models read and write in tokens | Part 1.1 |
 | TTFT | Time to first token: how long a caller waits for the first word of the answer | Part 5.2, Part 7.3 |
 | Utilisation | The share of time a GPU's arithmetic units are busy | Part 1.1, Part 5.1 |

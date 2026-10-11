@@ -40,9 +40,14 @@ The operator now runs vLLM v0.30.0. In that release the FlashInfer sampler is st
 `VLLM_USE_FLASHINFER_SAMPLER=0` is set (`vllm/envs.py`). The decision therefore still stands for
 `hack/serve-vllm.sh`.
 
+## Revisited for vLLM v0.31.0
+
+The operator now runs vLLM v0.31.0. `VLLM_USE_FLASHINFER_SAMPLER` still defaults to on in that
+release (`vllm/envs.py`), so the decision stands for `hack/serve-vllm.sh` unchanged.
+
 ## Open questions
 
-* The operator does not set this variable on the pods it creates. Nobody has yet run v0.30.0 on
+* The operator does not set this variable on the pods it creates. Nobody has yet run v0.31.0 on
   the RTX 500 Ada to see whether the JIT compile still fails. Until someone does, a pod on this
   card may hit the same failure. Setting it per InferenceService needs a spec field, and that
   waits on the test.

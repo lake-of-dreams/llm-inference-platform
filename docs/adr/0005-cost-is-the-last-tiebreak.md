@@ -27,8 +27,29 @@ substitution has no way to know its results no longer compare with yesterday's.
 * A cache in front of the router can undo the classification filter by serving an answer across
   classifications. ADR-0006 closes that.
 
+## Revised: cost per token
+
+Cost ranked backends by hourly price. Two backends at the same price and different throughput cost
+different amounts per answer, and a backend dearer by the hour can be cheaper per answer: 800
+thousandths of a dollar an hour at 400 tokens a second is 556 per million tokens, against 1,444
+for 520 an hour at 100 tokens a second.
+
+Each backend now has `tokens_per_second`, the generated tokens one replica sustains when busy. Cost
+ranks by `cost_per_mtok_milli_usd`, the hourly price divided by an hour of that throughput. A local
+backend costs zero per token. A paid backend with no throughput figure ranks after every backend
+that has one, and those without one rank by hourly price among themselves. The routing reason says
+which basis decided.
+
+The throughput is a figure from a load test, such as `vllm bench serve`, not the rate Prometheus
+observes. Observed throughput falls towards zero when a replica is idle, which would make the
+replica with the most spare room look the most expensive.
+
+Evidence: five tests in `gateway/tests/test_router.py`, from
+`test_same_hourly_price_faster_replica_is_cheaper_per_answer` to
+`test_local_backend_is_free_per_token_too`. Ranking by hourly price again fails three of them.
+
 ## Open questions
 
-* Cost ranks backends by hourly price. Two backends with the same price and different throughput
-  cost different amounts per answer. Ranking by cost per token needs measured throughput, which
-  the gateway does not collect yet.
+* The throughput figure is entered by hand. It goes stale when the model, the card or the vLLM
+  version changes, and nothing warns when it does. Comparing it with the throughput observed under
+  load would catch that.
