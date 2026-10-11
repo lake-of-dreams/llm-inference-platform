@@ -170,8 +170,11 @@ func desiredScaledObject(svc *servingv1alpha1.InferenceService, prometheusAddres
 			"scaleTargetRef":  map[string]any{"name": svc.Name},
 			"minReplicaCount": int64(a.MinReplicas),
 			"maxReplicaCount": int64(a.MaxReplicas),
-			"pollingInterval": int64(15),
-			"cooldownPeriod":  settle,
+			// No pollingInterval or cooldownPeriod. KEDA uses them only to
+			// scale to and from zero, and minReplicas is at least one, so
+			// they did nothing except draw a warning from KEDA's webhook on
+			// every apply. The HPA polls the metrics itself, and the
+			// scale-down window below does what cooldownPeriod seemed to.
 			"advanced": map[string]any{
 				"horizontalPodAutoscalerConfig": map[string]any{
 					"behavior": map[string]any{

@@ -162,6 +162,11 @@ func TestVLLMServiceCreatesEveryOwnedObject(t *testing.T) {
 	if minR, _, _ := unstructured.NestedInt64(so.Object, "spec", "minReplicaCount"); minR != 2 {
 		t.Errorf("minReplicaCount = %d", minR)
 	}
+	for _, f := range []string{"pollingInterval", "cooldownPeriod"} {
+		if _, found, _ := unstructured.NestedFieldNoCopy(so.Object, "spec", f); found {
+			t.Errorf("spec.%s only applies when scaling to zero, which this operator never does", f)
+		}
+	}
 
 	pool := &unstructured.Unstructured{}
 	pool.SetGroupVersionKind(inferencePoolGVK)
@@ -171,13 +176,91 @@ func TestVLLMServiceCreatesEveryOwnedObject(t *testing.T) {
 	}
 
 	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
-	for _, cond := range []string{CondAdmitted, CondAutoscaling, CondRouting} {
+	for _, cond := range []string{CondAdmitted, CondRouting} {
 		if !meta.IsStatusConditionTrue(got.Status.Conditions, cond) {
 			t.Errorf("condition %s not True: %+v", cond, got.Status.Conditions)
 		}
 	}
+	// No KEDA runs in envtest, so nobody has said the scaler works.
+	if c := meta.FindStatusCondition(got.Status.Conditions, CondAutoscaling); c == nil ||
+		c.Status != metav1.ConditionUnknown || c.Reason != "WaitingForKEDA" {
+		t.Errorf("autoscaling condition = %+v, want Unknown/WaitingForKEDA", c)
+	}
 	if got.Status.Phase != "Loading" || got.Status.ObservedGeneration != got.Generation {
 		t.Errorf("status = %+v", got.Status)
+	}
+}
+
+// Found on a kind cluster: the ScaledObject pointed at a Prometheus that did
+// not exist, KEDA marked it Ready=False, and the operator still reported
+// Autoscaling=True because it had applied the object.
+func TestAutoscalingReportsKEDAsVerdict(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+
+	setKEDAReady := func(status, reason, msg string) {
+		t.Helper()
+		so := &unstructured.Unstructured{}
+		so.SetGroupVersionKind(scaledObjectGVK)
+		get(t, so, ns, svc.Name)
+		_ = unstructured.SetNestedSlice(so.Object, []any{map[string]any{
+			"type": "Ready", "status": status, "reason": reason, "message": msg,
+		}}, "status", "conditions")
+		if err := k8s.Status().Update(ctx, so); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	setKEDAReady("False", "TriggerError", "Triggers defined in ScaledObject are not working correctly")
+	reconcileOnce(t, r, svc)
+	c := meta.FindStatusCondition(get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name).Status.Conditions, CondAutoscaling)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "ScalerNotReady" ||
+		!strings.Contains(c.Message, "TriggerError") {
+		t.Errorf("autoscaling = %+v, want False/ScalerNotReady quoting KEDA", c)
+	}
+
+	setKEDAReady("True", "ScaledObjectReady", "ScaledObject is defined correctly and is ready for scaling")
+	reconcileOnce(t, r, svc)
+	if !meta.IsStatusConditionTrue(get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name).Status.Conditions, CondAutoscaling) {
+		t.Error("autoscaling should be True once KEDA says the scaler is ready")
+	}
+}
+
+// Found on a kind cluster with no GPU driver: the pod could not be scheduled
+// because the device class did not exist, and status said "WeightsLoading".
+func TestUnschedulablePodIsReportedNotLoading(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	create(t, svc)
+	r := reconciler(k8s)
+	if res := reconcileOnce(t, r, svc); res.RequeueAfter != notReadyRequeue {
+		t.Errorf("requeue = %v while nothing is ready, want %v", res.RequeueAfter, notReadyRequeue)
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: svc.Name + "-abc", Namespace: ns, Labels: podLabels(svc)},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm", Image: vllmImage}}},
+	}
+	if err := k8s.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	const why = "0/3 nodes are available: request gpu: device class gpu.nvidia.com does not exist."
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+		Reason: corev1.PodReasonUnschedulable, Message: why,
+	}}
+	if err := k8s.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcileOnce(t, r, svc)
+	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	c := meta.FindStatusCondition(got.Status.Conditions, CondReady)
+	if got.Status.Phase != "Unschedulable" || c == nil || c.Reason != "Unschedulable" || c.Message != why {
+		t.Errorf("phase = %s, ready = %+v; want Unschedulable with the scheduler's message", got.Status.Phase, c)
 	}
 }
 

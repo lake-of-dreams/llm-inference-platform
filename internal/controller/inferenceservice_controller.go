@@ -39,6 +39,11 @@ const (
 	// edits that raise no event on an object the operator owns.
 	driftRequeue = 5 * time.Minute
 
+	// While no replica is ready. A pod the scheduler cannot place changes no
+	// object the operator watches, so without this the status would say the
+	// weights are loading for five minutes about a pod that will never start.
+	notReadyRequeue = 30 * time.Second
+
 	// Condition types reported in status.
 	CondAdmitted    = "Admitted"
 	CondReady       = "Ready"
@@ -59,6 +64,7 @@ type InferenceServiceReconciler struct {
 // +kubebuilder:rbac:groups=serving.platform.io,resources=inferenceservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
@@ -124,13 +130,45 @@ func (r *InferenceServiceReconciler) reconcile(ctx context.Context, svc *serving
 	if dep.Status.ReadyReplicas > 0 {
 		svc.Status.Phase = "Ready"
 		r.condition(svc, CondReady, metav1.ConditionTrue, "MinimumReplicasAvailable", "serving traffic")
+		l.V(1).Info("reconciled", "phase", svc.Status.Phase)
+		return ctrl.Result{RequeueAfter: driftRequeue}, nil
+	}
+	msg, err := r.unschedulable(ctx, svc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if msg != "" {
+		// Not loading. Nothing will start until the cluster changes, and the
+		// scheduler's own words say what is missing.
+		svc.Status.Phase = "Unschedulable"
+		r.condition(svc, CondReady, metav1.ConditionFalse, "Unschedulable", msg)
 	} else {
 		svc.Status.Phase = "Loading"
 		// Running but not ready is normal for minutes while weights load.
 		r.condition(svc, CondReady, metav1.ConditionFalse, "WeightsLoading", "no ready replicas yet")
 	}
 	l.V(1).Info("reconciled", "phase", svc.Status.Phase)
-	return ctrl.Result{RequeueAfter: driftRequeue}, nil
+	return ctrl.Result{RequeueAfter: notReadyRequeue}, nil
+}
+
+// unschedulable returns the scheduler's message for the first of this
+// service's pods it could not place, or "" if every pod has been placed or is
+// still waiting for its first attempt.
+func (r *InferenceServiceReconciler) unschedulable(ctx context.Context, svc *servingv1alpha1.InferenceService) (string, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(svc.Namespace),
+		client.MatchingLabels(selectorLabels(svc))); err != nil {
+		return "", fmt.Errorf("list pods: %w", err)
+	}
+	for _, p := range pods.Items {
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
+				c.Reason == corev1.PodReasonUnschedulable {
+				return c.Message, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // reconcileDeployment creates the Deployment with its initial replica count,
@@ -220,9 +258,50 @@ func (r *InferenceServiceReconciler) reconcileAutoscaling(ctx context.Context, s
 	case err != nil:
 		return fmt.Errorf("apply scaledobject: %w", err)
 	}
-	r.condition(svc, CondAutoscaling, metav1.ConditionTrue, "ScaledObjectApplied",
-		"KEDA scales on queue depth, KV cache usage and p95 TTFT")
+
+	// Applying the ScaledObject only proves the API server stored it. KEDA
+	// decides whether it works: a wrong Prometheus address or a query that
+	// returns nothing shows up as Ready=False on the ScaledObject, and the
+	// Deployment then never scales. Report KEDA's verdict, not ours.
+	so := &unstructured.Unstructured{}
+	so.SetGroupVersionKind(scaledObjectGVK)
+	if err := r.Get(ctx, types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}, so); err != nil {
+		return fmt.Errorf("read scaledobject: %w", err)
+	}
+	status, reason, message := scaledObjectReady(so)
+	switch status {
+	case metav1.ConditionTrue:
+		r.condition(svc, CondAutoscaling, metav1.ConditionTrue, "ScalerReady",
+			"KEDA scales on queue depth, KV cache usage and p95 TTFT")
+	case metav1.ConditionFalse:
+		r.condition(svc, CondAutoscaling, metav1.ConditionFalse, "ScalerNotReady",
+			fmt.Sprintf("KEDA reports %s: %s", reason, message))
+	default:
+		r.condition(svc, CondAutoscaling, metav1.ConditionUnknown, "WaitingForKEDA",
+			"ScaledObject applied; KEDA has not reported on it yet")
+	}
 	return nil
+}
+
+// scaledObjectReady reads KEDA's Ready condition. Unknown when KEDA has not
+// written one, which is also what an unstarted KEDA looks like.
+func scaledObjectReady(so *unstructured.Unstructured) (metav1.ConditionStatus, string, string) {
+	conds, _, _ := unstructured.NestedSlice(so.Object, "status", "conditions")
+	for _, c := range conds {
+		m, ok := c.(map[string]any)
+		if !ok || m["type"] != "Ready" {
+			continue
+		}
+		reason, _ := m["reason"].(string)
+		message, _ := m["message"].(string)
+		switch m["status"] {
+		case "True":
+			return metav1.ConditionTrue, reason, message
+		case "False":
+			return metav1.ConditionFalse, reason, message
+		}
+	}
+	return metav1.ConditionUnknown, "", ""
 }
 
 func (r *InferenceServiceReconciler) reconcileRouting(ctx context.Context, svc *servingv1alpha1.InferenceService) error {
