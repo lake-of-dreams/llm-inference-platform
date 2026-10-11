@@ -3,6 +3,10 @@
 Filter order is classification, capability, latency headroom, then cost. Cost
 ranks backends that are already eligible, it never removes one. Nothing eligible
 raises instead of downgrading. Reasoning in ADR-0005.
+
+Cost is compared per million generated tokens where a backend's throughput is
+known, because two replicas at the same hourly price can differ fourfold in what
+an answer costs. A backend with no throughput figure ranks after those with one.
 """
 
 from __future__ import annotations
@@ -35,10 +39,26 @@ class Backend:
     # observed p95 TTFT in ms, fed from metrics
     ttft_p95_ms: int = 0
     capabilities: frozenset[str] = field(default_factory=frozenset)
+    # Generated tokens per second one replica sustains when busy, from a load
+    # test such as `vllm bench serve`. Not the rate Prometheus sees: an idle
+    # replica generates almost nothing and would look ruinously expensive.
+    tokens_per_second: float = 0.0
+    # vLLM accepts a cache_salt that keeps its prefix cache apart per caller
+    # group (ADR-0008). Ollama does not.
+    prefix_cache_salt: bool = False
 
     @property
     def is_local(self) -> bool:
         return self.cost_per_hour_milli_usd == 0
+
+    @property
+    def cost_per_mtok_milli_usd(self) -> float | None:
+        """Thousandths of a USD per million generated tokens, or None if unknown."""
+        if self.is_local:
+            return 0.0
+        if self.tokens_per_second <= 0:
+            return None
+        return self.cost_per_hour_milli_usd / (self.tokens_per_second * 3600) * 1_000_000
 
 
 @dataclass
@@ -101,10 +121,22 @@ def route(req: Request, backends: Iterable[Backend]) -> RoutingDecision:
             f"no backend satisfies the request; rejected={rejected}"
         )
 
-    # 4. cost last. zero-cost local backends sort first.
-    chosen = min(in_budget, key=lambda b: (b.cost_per_hour_milli_usd, b.ttft_p95_ms))
+    # 4. cost last. per token where throughput is known, else per hour.
+    chosen = min(in_budget, key=_cost_key)
+    per_mtok = chosen.cost_per_mtok_milli_usd
+    basis = (f"{per_mtok:.0f}m$/Mtok" if per_mtok is not None
+             else f"{chosen.cost_per_hour_milli_usd}m$/h, throughput unknown")
     reason = (
         f"cheapest of {len(in_budget)} eligible "
-        f"(cost={chosen.cost_per_hour_milli_usd}m$/h, p95 TTFT={chosen.ttft_p95_ms}ms)"
+        f"(cost={basis}, p95 TTFT={chosen.ttft_p95_ms}ms)"
     )
     return RoutingDecision(chosen, reason, len(pool), rejected)
+
+
+def _cost_key(b: Backend) -> tuple[int, float, int]:
+    per_mtok = b.cost_per_mtok_milli_usd
+    if per_mtok is None:
+        # can't price an answer from an hourly rate alone. rank it after the
+        # backends we can price, and among themselves by the hourly rate.
+        return (1, float(b.cost_per_hour_milli_usd), b.ttft_p95_ms)
+    return (0, per_mtok, b.ttft_p95_ms)

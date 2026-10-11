@@ -6,9 +6,10 @@ from app.client import BackendError, InFlight, complete
 from app.router import Backend, Classification
 
 
-def backend(url: str, cost: int = 3600) -> Backend:
+def backend(url: str, cost: int = 3600, salt: bool = False) -> Backend:
     return Backend("vllm-test", url + "/v1", "qwen-small", max_context=2048,
-                   max_classification=Classification.RESTRICTED, cost_per_hour_milli_usd=cost)
+                   max_classification=Classification.RESTRICTED, cost_per_hour_milli_usd=cost,
+                   prefix_cache_salt=salt)
 
 
 def sse_handler(chunks, delay_before_first=0.0, captured=None):
@@ -75,3 +76,17 @@ def test_http_error_names_the_backend(http_server):
     with pytest.raises(BackendError, match="vllm-test returned HTTP 503"):
         complete(backend(url), "x", in_flight=flight)
     assert flight.current("vllm-test") == 0
+
+
+def test_cache_salt_reaches_a_backend_that_takes_one(http_server):
+    sent = []
+    url = http_server(sse_handler([delta("x")], captured=sent))
+    complete(backend(url, salt=True), "x", cache_salt="s" * 43)
+    assert sent[0]["cache_salt"] == "s" * 43
+
+
+def test_cache_salt_is_withheld_from_a_backend_that_does_not(http_server):
+    sent = []
+    url = http_server(sse_handler([delta("x")], captured=sent))
+    complete(backend(url, salt=False), "x", cache_salt="s" * 43)
+    assert "cache_salt" not in sent[0]

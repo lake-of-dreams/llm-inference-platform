@@ -16,7 +16,7 @@ import (
 const (
 	servingPort = 8000
 
-	vllmImage   = "vllm/vllm-openai:v0.30.0"
+	vllmImage   = "vllm/vllm-openai:v0.31.0"
 	ollamaImage = "ollama/ollama:0.35.1"
 
 	// The startup probe checks every startupPeriod seconds. Its failure budget

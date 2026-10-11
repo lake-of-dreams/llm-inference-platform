@@ -1,5 +1,5 @@
 import pytest
-from app.cache import CacheScope, SemanticCache, cosine, embed
+from app.cache import CacheScope, SemanticCache, cosine, embed, prefix_cache_salt
 from app.router import Classification
 
 INTERNAL = CacheScope.of(Classification.INTERNAL, "qwen-small")
@@ -72,3 +72,27 @@ def test_pluggable_dense_embedder():
 def test_cosine_rejects_mixed_vector_kinds():
     with pytest.raises(TypeError):
         cosine(embed("a b"), [1.0, 0.0])
+
+
+KEY = b"gateway-secret-for-tests"
+
+
+def test_prefix_salt_separates_tenants_and_classifications():
+    a = prefix_cache_salt(KEY, Classification.INTERNAL, "claims")
+    assert a == prefix_cache_salt(KEY, Classification.INTERNAL, "claims")   # stable, so reuse works
+    assert a != prefix_cache_salt(KEY, Classification.INTERNAL, "billing")
+    assert a != prefix_cache_salt(KEY, Classification.RESTRICTED, "claims")
+
+
+def test_prefix_salt_cannot_be_guessed_without_the_key():
+    salt = prefix_cache_salt(KEY, Classification.INTERNAL, "claims")
+    assert len(salt) == 43
+    assert "claims" not in salt and "INTERNAL" not in salt
+    assert salt != prefix_cache_salt(b"another-key", Classification.INTERNAL, "claims")
+
+
+def test_prefix_salt_refuses_to_run_without_a_key_or_tenant():
+    with pytest.raises(ValueError):
+        prefix_cache_salt(b"", Classification.INTERNAL, "claims")
+    with pytest.raises(ValueError):
+        prefix_cache_salt(KEY, Classification.INTERNAL, "")

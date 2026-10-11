@@ -112,8 +112,9 @@ def _sse_events(resp) -> Iterator[dict]:
 
 
 def complete(backend: Backend, prompt: str, max_tokens: int = 96, timeout: int = 120,
-             temperature: float = 0.2, in_flight: InFlight = IN_FLIGHT) -> tuple[str, CallRecord]:
-    payload = json.dumps({
+             temperature: float = 0.2, in_flight: InFlight = IN_FLIGHT,
+             cache_salt: str | None = None) -> tuple[str, CallRecord]:
+    body: dict = {
         "model": backend.model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
@@ -121,7 +122,11 @@ def complete(backend: Backend, prompt: str, max_tokens: int = 96, timeout: int =
         "stream": True,
         # vLLM and Ollama both send a final usage event when asked.
         "stream_options": {"include_usage": True},
-    }).encode()
+    }
+    # only to a backend that understands it. see cache.prefix_cache_salt
+    if cache_salt and backend.prefix_cache_salt:
+        body["cache_salt"] = cache_salt
+    payload = json.dumps(body).encode()
     req = urllib.request.Request(
         f"{backend.base_url.rstrip('/')}/chat/completions",
         data=payload, headers={"Content-Type": "application/json"}, method="POST")

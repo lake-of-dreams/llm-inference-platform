@@ -21,7 +21,9 @@ false_hits_blocked.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import math
 import re
 import time
@@ -189,3 +191,27 @@ class SemanticCache:
     def hit_rate(self) -> float:
         total = self.hits + self.misses
         return self.hits / total if total else 0.0
+
+
+def prefix_cache_salt(key: bytes, classification: Classification, tenant: str) -> str:
+    """The cache_salt vLLM mixes into its prefix cache, one per tenant and classification.
+
+    The semantic cache above is the gateway's. vLLM keeps a second cache below
+    it: the attention state of prompt prefixes it has already read, reused when
+    a new prompt starts the same way. Reuse makes the first token arrive sooner,
+    and that speed is visible to whoever sent the prompt. A caller can time a
+    guess at another tenant's system prompt or document and learn whether
+    someone sent it. A salt keeps reuse inside one group (ADR-0008).
+
+    The salt is an HMAC under a gateway secret, not the group's name. Anyone who
+    can reach vLLM directly can send any salt they like, so a guessable salt
+    would let them join another group's cache.
+    """
+    if not key:
+        raise ValueError("prefix cache salt needs a secret key")
+    if not tenant:
+        raise ValueError("prefix cache salt needs a tenant")
+    msg = f"{tenant}\x1f{classification.name}".encode()
+    digest = hmac.new(key, msg, hashlib.sha256).digest()
+    # 43 characters, the size vLLM's documentation suggests
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()

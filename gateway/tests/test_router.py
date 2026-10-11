@@ -42,3 +42,44 @@ def test_latency_budget_excludes_slow_backend():
 def test_gate_raises_never_downgrades():
     with pytest.raises(NoEligibleBackend):
         route(Request("x", required_capabilities=frozenset({"vision"})), POOL)
+
+
+def _paid(name, per_hour, tps=0.0, ttft=500):
+    return Backend(name, "http://x/v1", "m", max_context=8192,
+                   max_classification=Classification.RESTRICTED,
+                   cost_per_hour_milli_usd=per_hour, ttft_p95_ms=ttft,
+                   tokens_per_second=tps)
+
+
+def test_same_hourly_price_faster_replica_is_cheaper_per_answer():
+    slow, fast = _paid("slow", 2000, tps=300), _paid("fast", 2000, tps=1200)
+    d = route(Request("x"), [slow, fast])
+    assert d.backend.name == "fast"
+    assert "m$/Mtok" in d.reason
+
+
+def test_dearer_by_the_hour_can_be_cheaper_per_token():
+    # 520 m$/h at 100 tok/s is 1444 m$ per million tokens.
+    # 800 m$/h at 400 tok/s is 556.
+    cheap_hour = _paid("cheap-hour", 520, tps=100)
+    cheap_token = _paid("cheap-token", 800, tps=400)
+    assert cheap_hour.cost_per_mtok_milli_usd == pytest.approx(1444.4, abs=0.1)
+    assert cheap_token.cost_per_mtok_milli_usd == pytest.approx(555.6, abs=0.1)
+    assert route(Request("x"), [cheap_hour, cheap_token]).backend.name == "cheap-token"
+
+
+def test_unknown_throughput_ranks_after_a_priced_backend():
+    unknown = _paid("unknown", 100)            # cheap by the hour, cost per answer unknown
+    priced = _paid("priced", 3000, tps=2000)
+    assert unknown.cost_per_mtok_milli_usd is None
+    assert route(Request("x"), [unknown, priced]).backend.name == "priced"
+
+
+def test_hourly_price_still_decides_when_nothing_is_priced_per_token():
+    d = route(Request("x"), [_paid("a", 900), _paid("b", 400)])
+    assert d.backend.name == "b"
+    assert "throughput unknown" in d.reason
+
+
+def test_local_backend_is_free_per_token_too():
+    assert OLLAMA.cost_per_mtok_milli_usd == 0.0
