@@ -311,7 +311,9 @@ Ollama's web listener starts within a second, long before the weights arrive, so
 startup probe would pass too early.
 
 ADR-0002 and ADR-0003 record these decisions, including a vLLM start-up failure on Fernhill's card
-that looks like running out of memory and is not.
+that looks like running out of memory and is not. Its first diagnosis blamed the card; the last line
+of the traceback said a build tool, `ninja`, was not on `PATH`. Guide 5 walks through how each
+reading of that log was made, and where the first one stopped too soon.
 
 ## Part 5. Scaling on the signal that moves first
 
@@ -632,7 +634,7 @@ Extension and says so in status (Part 2).
 
 The reasoning behind each decision is in `docs/adr/`.
 
-Four guides in `docs/guides/` teach one subject each from zero, with Fernhill as the running
+Five guides in `docs/guides/` teach one subject each from zero, with Fernhill as the running
 example and real measurements from the laptop GPU:
 
 | Guide | Plain meaning |
@@ -641,12 +643,13 @@ example and real measurements from the laptop GPU:
 | `02-prefix-caching-and-timing-from-zero.md` | How the model server's memory of earlier prompts leaks across teams, and how a keyed salt stops it |
 | `03-an-operator-on-a-real-cluster-from-zero.md` | The operator's first run on a real cluster, the wrong status answers it exposed, and crash loops reported as they happen |
 | `04-one-request-through-the-gateway-from-zero.md` | The five steps one request takes through the gateway, and the answer cache that crossed teams |
+| `05-reading-a-crash-log-from-zero.md` | A vLLM start-up failure read twice: the first diagnosis blamed the card, the last line of the traceback named a missing `PATH` entry |
 
 | Record | Plain meaning |
 |---|---|
 | ADR-0001 | Scale on waiting requests, cache fill and first-token latency, not GPU utilisation |
 | ADR-0002 | Every model container gets a startup probe sized to its weight-load time |
-| ADR-0003 | Turn off vLLM's FlashInfer sampler on Fernhill's class of card, where its compile step fails |
+| ADR-0003 | The FlashInfer sampler's failure on the laptop card was a missing `PATH` entry for `ninja`, not the hardware |
 | ADR-0004 | The operator sets the replica count once, at creation, and never again |
 | ADR-0005 | Route on classification, then capability, then latency, then cost |
 | ADR-0006 | Divide the semantic cache by classification, model and sampling settings |
@@ -667,8 +670,9 @@ person who owns the platform.
 * **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
   laptop cluster nothing listened there, and the status now says so (ADR-0009).
 * **`make verify` has run on vLLM v0.29.0, not yet v0.31.0.** Every check passed on the laptop GPU, including the salt and its control. The operator pins v0.31.0, so the check is to be repeated there.
-* **FlashInfer on the new vLLM.** The operator does not turn off the FlashInfer sampler on the pods
-  it creates. Whether v0.31.0 still fails on Fernhill's card is untested (ADR-0003).
+* **`ninja` inside the vLLM image.** On the laptop, FlashInfer's compile failed because `ninja` was
+  not on `PATH`, not because of the card (ADR-0003). Whether the `vllm/vllm-openai` image the
+  operator runs has `ninja` on `PATH` is unchecked.
 * **Scale-to-zero.** It needs a demand signal that exists with no replicas running, such as a
   queue length reported by the gateway (ADR-0001).
 * **Throughput figures are typed in.** Cost per token needs each backend's busy throughput, which

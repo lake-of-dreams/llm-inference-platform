@@ -1,6 +1,6 @@
-# ADR-0003: Disable the FlashInfer sampler on this hardware
+# ADR-0003: The FlashInfer sampler failure was a missing PATH entry, not the hardware
 
-**Status:** Accepted, revisited
+**Status:** Superseded by the root cause below. The original decision is kept for the record.
 
 ## Context
 First start of vLLM 0.29.0 on an RTX 500 Ada (SM 8.9, 4 GB) died with:
@@ -45,10 +45,44 @@ The operator now runs vLLM v0.30.0. In that release the FlashInfer sampler is st
 The operator now runs vLLM v0.31.0. `VLLM_USE_FLASHINFER_SAMPLER` still defaults to on in that
 release (`vllm/envs.py`), so the decision stands for `hack/serve-vllm.sh` unchanged.
 
+## Root cause, found by running it again
+
+Run again on the same card with vLLM v0.29.0 and `VLLM_USE_FLASHINFER_SAMPLER=1`, the log matched
+the first failure line for line: weights loaded, "Available KV cache memory: 1.97 GiB", then the
+traceback in `top_k_top_p_sampling_from_logits`. Reading the traceback to its last line instead of
+its first:
+
+    flashinfer/jit/cpp_ext.py, in run_ninja
+    FileNotFoundError: [Errno 2] No such file or directory: 'ninja'
+
+FlashInfer compiles its sampling kernels with the `ninja` build tool. `ninja` was installed, in the
+venv's `bin` directory, by pip. But `hack/serve-vllm.sh` ran vLLM by its full path without
+activating the venv, so that directory was never on `PATH`. The compile could not start. The card,
+the driver and the toolkit were never the problem.
+
+With the venv's `bin` on `PATH` and the sampler on, the first compile took about 1 minute 40
+seconds and then vLLM served normally. Every check in `hack/verify.py` passed. Throughput was the
+same as with the native sampler: a median of 436 tokens a second against 421, within the spread
+between bursts.
+
+The original diagnosis read forwards from the last success, which ruled out memory, and then stopped
+at the first frame that looked like an explanation: "the compile fails for this SM". The last line
+of the traceback said why the compile failed.
+
+## Decision, revised
+* `hack/serve-vllm.sh` puts the directory holding `vllm` on `PATH`, so tools installed beside it
+  are found.
+* The sampler is no longer turned off by default. `VLLM_USE_FLASHINFER_SAMPLER=0` still works as an
+  override.
+* The script checks for `ninja` before starting and stops with a message naming the fix if the
+  sampler is on and `ninja` is missing. A missing build tool should fail in one line at start, not
+  in a traceback a minute into loading.
+
 ## Open questions
 
-* The operator does not set this variable on the pods it creates. Nobody has yet run v0.31.0 on
-  the RTX 500 Ada to see whether the JIT compile still fails. Until someone does, a pod on this
-  card may hit the same failure. Setting it per InferenceService needs a spec field, and that
-  waits on the test.
-
+* Whether `ninja` is on `PATH` inside the `vllm/vllm-openai` image the operator runs has not been
+  checked here. If it is not, the operator's pods would fail the same way. Running one such pod on
+  a GPU node would settle it.
+* The first request after start waits for the compile, about 1 minute 40 seconds on this card. A
+  startup probe sized only to weight loading (ADR-0002) does not include it. On this card the
+  compile happened during warm-up, before the server reported ready, so the probe covered it.
