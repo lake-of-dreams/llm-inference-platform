@@ -133,15 +133,15 @@ func (r *InferenceServiceReconciler) reconcile(ctx context.Context, svc *serving
 		l.V(1).Info("reconciled", "phase", svc.Status.Phase)
 		return ctrl.Result{RequeueAfter: driftRequeue}, nil
 	}
-	msg, err := r.unschedulable(ctx, svc)
+	phase, reason, msg, err := r.podTrouble(ctx, svc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if msg != "" {
-		// Not loading. Nothing will start until the cluster changes, and the
-		// scheduler's own words say what is missing.
-		svc.Status.Phase = "Unschedulable"
-		r.condition(svc, CondReady, metav1.ConditionFalse, "Unschedulable", msg)
+	if phase != "" {
+		// Not loading. Nothing will start until something changes, and the
+		// scheduler's or the kubelet's own words say what.
+		svc.Status.Phase = phase
+		r.condition(svc, CondReady, metav1.ConditionFalse, reason, msg)
 	} else {
 		svc.Status.Phase = "Loading"
 		// Running but not ready is normal for minutes while weights load.
@@ -151,24 +151,57 @@ func (r *InferenceServiceReconciler) reconcile(ctx context.Context, svc *serving
 	return ctrl.Result{RequeueAfter: notReadyRequeue}, nil
 }
 
-// unschedulable returns the scheduler's message for the first of this
-// service's pods it could not place, or "" if every pod has been placed or is
-// still waiting for its first attempt.
-func (r *InferenceServiceReconciler) unschedulable(ctx context.Context, svc *servingv1alpha1.InferenceService) (string, error) {
+// Container waiting reasons that mean the container will not start without a
+// change: a crash loop, an image that cannot be pulled, a bad configuration.
+// "ContainerCreating" and "PodInitializing" are not here: they are normal.
+var failingReasons = map[string]bool{
+	"CrashLoopBackOff":           true,
+	"ImagePullBackOff":           true,
+	"ErrImagePull":               true,
+	"InvalidImageName":           true,
+	"CreateContainerConfigError": true,
+	"CreateContainerError":       true,
+	"RunContainerError":          true,
+}
+
+// podTrouble looks at this service's pods while none is ready. It returns the
+// phase, condition reason and message for the first pod that will not start
+// without a change, or empty strings if every pod looks like it is still
+// loading. The scheduler's verdict comes first: an unplaced pod has no
+// containers to report on.
+func (r *InferenceServiceReconciler) podTrouble(ctx context.Context, svc *servingv1alpha1.InferenceService) (phase, reason, msg string, err error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(svc.Namespace),
 		client.MatchingLabels(selectorLabels(svc))); err != nil {
-		return "", fmt.Errorf("list pods: %w", err)
+		return "", "", "", fmt.Errorf("list pods: %w", err)
 	}
 	for _, p := range pods.Items {
 		for _, c := range p.Status.Conditions {
 			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
 				c.Reason == corev1.PodReasonUnschedulable {
-				return c.Message, nil
+				return "Unschedulable", "Unschedulable", c.Message, nil
 			}
 		}
 	}
-	return "", nil
+	for _, p := range pods.Items {
+		for _, cs := range p.Status.ContainerStatuses {
+			w := cs.State.Waiting
+			if w == nil || !failingReasons[w.Reason] {
+				continue
+			}
+			m := fmt.Sprintf("container %s: %s", cs.Name, w.Reason)
+			if w.Message != "" {
+				m += ": " + w.Message
+			}
+			// A crash loop's waiting message says only "back-off restarting".
+			// Why it crashed is in the last termination: OOMKilled, exit 137.
+			if t := cs.LastTerminationState.Terminated; t != nil {
+				m += fmt.Sprintf(" (last exit: %s, code %d, %d restarts)", t.Reason, t.ExitCode, cs.RestartCount)
+			}
+			return "Failing", w.Reason, m, nil
+		}
+	}
+	return "", "", "", nil
 }
 
 // reconcileDeployment creates the Deployment with its initial replica count,

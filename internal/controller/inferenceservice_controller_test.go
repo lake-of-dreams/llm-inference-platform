@@ -583,3 +583,69 @@ func TestSamplesAreAdmitted(t *testing.T) {
 		}
 	}
 }
+
+// The open question ADR-0009 left: a pod that schedules and then crashes while
+// loading, for example out of GPU memory, showed "WeightsLoading" until its
+// startup probe gave up, and the crash reason was only in the pod.
+func TestCrashingContainerIsReportedWithItsLastExit(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: svc.Name + "-crash", Namespace: ns, Labels: podLabels(svc)},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm", Image: vllmImage}}},
+	}
+	if err := k8s.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionTrue}}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "vllm", Image: vllmImage, RestartCount: 4,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "CrashLoopBackOff", Message: "back-off 2m40s restarting failed container"}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+			Reason: "OOMKilled", ExitCode: 137}},
+	}}
+	if err := k8s.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcileOnce(t, r, svc)
+	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	c := meta.FindStatusCondition(got.Status.Conditions, CondReady)
+	if got.Status.Phase != "Failing" || c == nil || c.Reason != "CrashLoopBackOff" ||
+		!strings.Contains(c.Message, "OOMKilled") || !strings.Contains(c.Message, "4 restarts") {
+		t.Errorf("phase = %s, ready = %+v; want Failing/CrashLoopBackOff naming OOMKilled", got.Status.Phase, c)
+	}
+}
+
+// A container that is still being created is loading, not failing.
+func TestCreatingContainerStillReadsAsLoading(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: svc.Name + "-new", Namespace: ns, Labels: podLabels(svc)},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm", Image: vllmImage}}},
+	}
+	if err := k8s.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "vllm", Image: vllmImage,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+	}}
+	if err := k8s.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOnce(t, r, svc)
+	if got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name); got.Status.Phase != "Loading" {
+		t.Errorf("phase = %s, want Loading while the container is being created", got.Status.Phase)
+	}
+}

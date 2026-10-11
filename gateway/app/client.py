@@ -38,6 +38,8 @@ class CallRecord:
     # mean number of calls sharing the replica while this one ran
     concurrency: float = 1.0
     cached: bool = False
+    # who the call was made for, so cost can be shown per team
+    tenant: str = ""
 
 
 @dataclass
@@ -60,6 +62,16 @@ class Ledger:
             b["tokens"] += r.prompt_tokens + r.completion_tokens
             b["milli_usd"] += r.cost_milli_usd
             b["ms"] += r.latency_ms
+        return out
+
+    def by_tenant(self) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for r in self.records:
+            t = out.setdefault(r.tenant, {"calls": 0, "cached": 0, "tokens": 0, "milli_usd": 0.0})
+            t["calls"] += 1
+            t["cached"] += r.cached
+            t["tokens"] += r.prompt_tokens + r.completion_tokens
+            t["milli_usd"] += r.cost_milli_usd
         return out
 
 

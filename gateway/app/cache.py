@@ -90,12 +90,16 @@ class CacheScope:
     temperature: float = 0.0
     max_tokens: int = 0
     system_prompt_sha: str = ""
+    # Two teams at the same classification are still two teams. Without this,
+    # HR's cached Internal answer was served to a contracts user who sent the
+    # same words: the whole answer, not a timing hint (ADR-0010).
+    tenant: str = ""
 
     @classmethod
     def of(cls, classification: Classification, model: str, *, temperature: float = 0.0,
-           max_tokens: int = 0, system_prompt: str = "") -> CacheScope:
+           max_tokens: int = 0, system_prompt: str = "", tenant: str = "") -> CacheScope:
         sha = hashlib.sha256(system_prompt.encode()).hexdigest()[:16] if system_prompt else ""
-        return cls(classification, model, temperature, max_tokens, sha)
+        return cls(classification, model, temperature, max_tokens, sha, tenant)
 
 
 @dataclass
