@@ -86,3 +86,10 @@ of the traceback said why the compile failed.
 * The first request after start waits for the compile, about 1 minute 40 seconds on this card. A
   startup probe sized only to weight loading (ADR-0002) does not include it. On this card the
   compile happened during warm-up, before the server reported ready, so the probe covered it.
+
+## Revisited for vLLM v0.33.0
+
+The operator now runs vLLM v0.33.0. `VLLM_USE_FLASHINFER_SAMPLER` still defaults to on in that
+source (`vllm/envs.py`). v0.33.0 images are built for CUDA 13 only, so the question of whether
+`ninja` is on `PATH` inside the image is joined by a second one: whether the node's driver is recent
+enough for the image to start at all. Neither has been checked on a GPU node.

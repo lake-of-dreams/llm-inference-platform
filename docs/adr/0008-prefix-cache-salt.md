@@ -50,3 +50,10 @@ source, so a salt can no longer collide with a LoRA adapter's name.
   403-token prompt, a different group sending the same text reused 0, and a control with no salt
   reused 336, which shows the leak is real on that server. Timing barely moved on a 0.5B model, so
   the counter is the evidence, not the latency.
+
+## Revisited for vLLM v0.33.0
+
+The `cache_salt` field is still in the chat completion request in the v0.33.0 source, with a
+maximum length of 1,024 characters, so the 43-character salt is accepted. v0.33.0 turns on a new way
+of matching cached prefixes for some speculative decoding modes. The live measurement was made on
+v0.29.0 and is to be repeated on v0.33.0 before the isolation is relied on there.

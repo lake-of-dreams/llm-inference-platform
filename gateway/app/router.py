@@ -46,6 +46,11 @@ class Backend:
     # vLLM accepts a cache_salt that keeps its prefix cache apart per caller
     # group (ADR-0008). Ollama does not.
     prefix_cache_salt: bool = False
+    # Name of the llm-d InferenceObjective the operator created for this
+    # service, when the backend sits behind llm-d's endpoint picker. The picker
+    # reads the request's priority from it (ADR-0011). Empty means a plain
+    # Service with no picker in front.
+    objective: str = ""
 
     @property
     def is_local(self) -> bool:

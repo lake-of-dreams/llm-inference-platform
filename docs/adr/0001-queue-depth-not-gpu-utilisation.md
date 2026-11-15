@@ -78,3 +78,7 @@ ScaledObject CRD in `internal/controller/inferenceservice_controller_test.go`.
   length reported by the gateway. Nothing in this repository provides one yet.
 * Kubernetes 1.37 made the HPA's tolerance configurable per object. Before then a 10% band was
   fixed for the whole cluster. Whether a tighter tolerance helps here has not been measured.
+
+The names were checked again in the v0.33.0 source and are unchanged: `vllm:num_requests_waiting`,
+`vllm:kv_cache_usage_perc` and `vllm:time_to_first_token_seconds`, each labelled with `model_name`.
+v0.33.0 adds `vllm:num_requests_waiting_by_reason`, which the triggers do not use.

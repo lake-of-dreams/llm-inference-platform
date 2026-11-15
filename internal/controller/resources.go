@@ -21,6 +21,9 @@ import (
 var (
 	scaledObjectGVK  = schema.GroupVersionKind{Group: "keda.sh", Version: "v1alpha1", Kind: "ScaledObject"}
 	inferencePoolGVK = schema.GroupVersionKind{Group: "inference.networking.k8s.io", Version: "v1", Kind: "InferencePool"}
+	// llm-d moved InferenceObjective out of the Gateway API Inference Extension
+	// and into its own group at 1.0.
+	inferenceObjectiveGVK = schema.GroupVersionKind{Group: "llm-d.ai", Version: "v1", Kind: "InferenceObjective"}
 )
 
 // selectorLabels identify the pods of one InferenceService. A Deployment's
@@ -216,6 +219,28 @@ func desiredInferencePool(svc *servingv1alpha1.InferenceService) *unstructured.U
 		},
 	}}
 	u.SetGroupVersionKind(inferencePoolGVK)
+	return u
+}
+
+// desiredInferenceObjective gives the service's pool a priority. llm-d's flow
+// control reads it when the pool is saturated: requests wait in the endpoint
+// picker and leave in priority order, and negative priorities are shed first.
+// Flow control is a feature gate on the endpoint picker, off by default, so the
+// object is stored either way and only acts where the gate is on.
+func desiredInferenceObjective(svc *servingv1alpha1.InferenceService) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":            svc.Name,
+			"namespace":       svc.Namespace,
+			"labels":          toAny(podLabels(svc)),
+			"ownerReferences": []any{ownerRefMap(svc)},
+		},
+		"spec": map[string]any{
+			"priority": int64(*svc.Spec.Priority),
+			"poolRefs": []any{map[string]any{"name": svc.Name}},
+		},
+	}}
+	u.SetGroupVersionKind(inferenceObjectiveGVK)
 	return u
 }
 

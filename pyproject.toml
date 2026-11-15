@@ -5,7 +5,8 @@ description = "Cost- and capability-aware routing across LLM backends"
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "opentelemetry-sdk>=1.42"]
+tracing = ["opentelemetry-api>=1.42"]
 
 [build-system]
 requires = ["setuptools>=68"]

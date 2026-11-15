@@ -40,8 +40,8 @@ spec:
       openAPIV3Schema:
         description: |-
           InferenceService declares one served model. The operator turns it into a
-          Deployment, a Service, a GPU claim template, a KEDA ScaledObject and an
-          InferencePool.
+          Deployment, a Service, a GPU claim template, a KEDA ScaledObject, an
+          InferencePool and, when a priority is set, an llm-d InferenceObjective.
 
           There is deliberately no scale subresource. A scale subresource would let
           `kubectl scale` or an autoscaler write the replica count back into this
@@ -188,6 +188,15 @@ spec:
                   weights across pod restarts. Empty means a scratch volume, so every new
                   pod downloads the model again.
                 type: string
+              priority:
+                description: |-
+                  Priority ranks this model's requests against others when a pool is
+                  saturated. Higher is more important and negative means the requests may
+                  be shed. The operator writes it to an llm-d InferenceObjective for the
+                  service's pool, and llm-d's flow control queues and sheds by it. Unset
+                  means no objective. ADR-0011.
+                format: int32
+                type: integer
               weightLoadSeconds:
                 default: 600
                 description: |-
@@ -276,6 +285,32 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              devices:
+                description: |-
+                  Devices lists what the scheduler actually allocated, per pod. A claim
+                  asks for "one device of this class with at least this much memory";
+                  this says which card answered. ADR-0012.
+                items:
+                  description: |-
+                    AllocatedDevice is one device the scheduler gave to one of the service's
+                    pods, copied from the pod's ResourceClaim.
+                  properties:
+                    device:
+                      type: string
+                    driver:
+                      type: string
+                    pod:
+                      type: string
+                    pool:
+                      type: string
+                  required:
+                  - device
+                  - driver
+                  - pod
+                  - pool
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
               endpoint:
                 type: string
               observedGeneration:

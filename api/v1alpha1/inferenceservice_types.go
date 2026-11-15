@@ -107,6 +107,14 @@ type InferenceServiceSpec struct {
 	// +kubebuilder:default={}
 	Autoscaling AutoscalingSpec `json:"autoscaling,omitempty"`
 
+	// Priority ranks this model's requests against others when a pool is
+	// saturated. Higher is more important and negative means the requests may
+	// be shed. The operator writes it to an llm-d InferenceObjective for the
+	// service's pool, and llm-d's flow control queues and sheds by it. Unset
+	// means no objective. ADR-0011.
+	// +optional
+	Priority *int32 `json:"priority,omitempty"`
+
 	// CostPerHourMilliUSD is the marginal cost of one replica in thousandths of
 	// a US dollar per hour. The gateway ranks backends on it.
 	// +kubebuilder:default=0
@@ -150,19 +158,34 @@ type AutoscalingSpec struct {
 	KVCacheUsagePercent int32 `json:"kvCacheUsagePercent,omitempty"`
 }
 
+// AllocatedDevice is one device the scheduler gave to one of the service's
+// pods, copied from the pod's ResourceClaim.
+type AllocatedDevice struct {
+	Pod    string `json:"pod"`
+	Driver string `json:"driver"`
+	Pool   string `json:"pool"`
+	Device string `json:"device"`
+}
+
 type InferenceServiceStatus struct {
 	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
 	ReadyReplicas      int32  `json:"readyReplicas,omitempty"`
 	Endpoint           string `json:"endpoint,omitempty"`
 	Phase              string `json:"phase,omitempty"`
+	// Devices lists what the scheduler actually allocated, per pod. A claim
+	// asks for "one device of this class with at least this much memory";
+	// this says which card answered. ADR-0012.
+	// +listType=atomic
+	// +optional
+	Devices []AllocatedDevice `json:"devices,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // InferenceService declares one served model. The operator turns it into a
-// Deployment, a Service, a GPU claim template, a KEDA ScaledObject and an
-// InferencePool.
+// Deployment, a Service, a GPU claim template, a KEDA ScaledObject, an
+// InferencePool and, when a priority is set, an llm-d InferenceObjective.
 //
 // There is deliberately no scale subresource. A scale subresource would let
 // `kubectl scale` or an autoscaler write the replica count back into this

@@ -79,7 +79,7 @@ scale.
 ### 1.2 The operator and the reconcile loop
 
 An **operator** is a program that watches objects of a kind and makes the rest of the cluster match
-them. For each InferenceService, this operator creates five objects:
+them. For each InferenceService, this operator creates five objects, and a sixth when a priority is set (ADR-0011):
 
 | Object | Plain meaning | For `qwen-small` |
 |---|---|---|

@@ -649,3 +649,133 @@ func TestCreatingContainerStillReadsAsLoading(t *testing.T) {
 		t.Errorf("phase = %s, want Loading while the container is being created", got.Status.Phase)
 	}
 }
+
+// ADR-0011. A priority becomes an llm-d InferenceObjective on the service's
+// pool, and clearing it removes the objective and the condition.
+func TestPriorityBecomesAnObjectiveOnThePool(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	svc.Spec.Priority = new(int32(-1))
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(inferenceObjectiveGVK)
+	get(t, obj, ns, svc.Name)
+	if p, _, _ := unstructured.NestedInt64(obj.Object, "spec", "priority"); p != -1 {
+		t.Errorf("objective priority = %d, want -1", p)
+	}
+	refs, _, _ := unstructured.NestedSlice(obj.Object, "spec", "poolRefs")
+	if len(refs) != 1 || refs[0].(map[string]any)["name"] != svc.Name {
+		t.Errorf("poolRefs = %v, want the service's own pool", refs)
+	}
+	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, CondPrioritised) {
+		t.Errorf("conditions = %+v, want Prioritised=True", got.Status.Conditions)
+	}
+
+	got.Spec.Priority = nil
+	if err := k8s.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOnce(t, r, svc)
+	err := k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: svc.Name}, obj)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("objective should be deleted once priority is unset; get returned %v", err)
+	}
+	got = get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	if c := meta.FindStatusCondition(got.Status.Conditions, CondPrioritised); c != nil {
+		t.Errorf("Prioritised condition = %+v, want it removed", c)
+	}
+}
+
+// A priority that nothing will read is reported, not silently stored.
+func TestPriorityWithoutTheCRDIsReported(t *testing.T) {
+	env, cfg := startEnv(baseCRDs)
+	defer func() { _ = env.Stop() }()
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "no-llmd"}}
+	if err := c.Create(ctx, ns); err != nil {
+		t.Fatal(err)
+	}
+	svc := vllmService(ns.Name)
+	svc.Spec.Priority = new(int32(10))
+	if err := c.Create(ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOnce(t, reconciler(c), svc)
+	got := &servingv1alpha1.InferenceService{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(svc), got); err != nil {
+		t.Fatal(err)
+	}
+	cond := meta.FindStatusCondition(got.Status.Conditions, CondPrioritised)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "InferenceObjectiveNotInstalled" {
+		t.Errorf("Prioritised = %+v, want False/InferenceObjectiveNotInstalled", cond)
+	}
+}
+
+// ADR-0012. Status names the device the scheduler allocated to each pod, and
+// ignores claims that belong to other pods in the namespace.
+func TestAllocatedDevicesAreReportedPerPod(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+
+	mkPod := func(name string, labels map[string]string) *corev1.Pod {
+		t.Helper()
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: vllmImage}}},
+		}
+		if err := k8s.Create(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mkClaim := func(owner *corev1.Pod, device string) {
+		t.Helper()
+		c := &resourcev1.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: owner.Name + "-gpu", Namespace: ns,
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: "v1", Kind: "Pod", Name: owner.Name, UID: owner.UID,
+					Controller: new(true),
+				}},
+			},
+			Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+				Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1,
+				}}},
+			}},
+		}
+		if err := k8s.Create(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		c.Status.Allocation = &resourcev1.AllocationResult{Devices: resourcev1.DeviceAllocationResult{
+			Results: []resourcev1.DeviceRequestAllocationResult{{
+				Request: "gpu", Driver: "gpu.nvidia.com", Pool: "worker-1", Device: device,
+			}},
+		}}
+		if err := k8s.Status().Update(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mine := mkPod(svc.Name+"-abc", podLabels(svc))
+	other := mkPod("someone-else", map[string]string{"app": "other"})
+	mkClaim(mine, "gpu-0")
+	mkClaim(other, "gpu-1")
+
+	reconcileOnce(t, r, svc)
+	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name).Status.Devices
+	want := []servingv1alpha1.AllocatedDevice{{Pod: mine.Name, Driver: "gpu.nvidia.com", Pool: "worker-1", Device: "gpu-0"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("status.devices = %+v, want %+v", got, want)
+	}
+}

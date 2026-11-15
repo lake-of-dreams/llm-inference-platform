@@ -83,6 +83,10 @@ samples:
 	kubectl create namespace llm-platform --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f config/samples/
 
+# The gateway's decisions with stand-in backends. No cluster, GPU or model.
+demo:
+	.venv/bin/python hack/demo.py
+
 # End-to-end against live backends: vLLM on :8001 and Ollama on :11434.
 verify:
 	.venv/bin/python hack/verify.py

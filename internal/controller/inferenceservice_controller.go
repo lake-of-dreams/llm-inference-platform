@@ -1,9 +1,11 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -49,6 +51,7 @@ const (
 	CondReady       = "Ready"
 	CondAutoscaling = "Autoscaling"
 	CondRouting     = "Routing"
+	CondPrioritised = "Prioritised"
 )
 
 type InferenceServiceReconciler struct {
@@ -68,6 +71,8 @@ type InferenceServiceReconciler struct {
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=llm-d.ai,resources=inferenceobjectives,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaims,verbs=get;list;watch
 
 func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var svc servingv1alpha1.InferenceService
@@ -122,6 +127,12 @@ func (r *InferenceServiceReconciler) reconcile(ctx context.Context, svc *serving
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileRouting(ctx, svc); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reconcilePriority(ctx, svc); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.reportDevices(ctx, svc); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -352,6 +363,72 @@ func (r *InferenceServiceReconciler) reconcileRouting(ctx context.Context, svc *
 	return nil
 }
 
+// reconcilePriority writes spec.priority to an llm-d InferenceObjective for the
+// pool, and removes the objective and the condition when priority is unset.
+func (r *InferenceServiceReconciler) reconcilePriority(ctx context.Context, svc *servingv1alpha1.InferenceService) error {
+	if svc.Spec.Priority == nil {
+		meta.RemoveStatusCondition(&svc.Status.Conditions, CondPrioritised)
+		return r.deleteUnstructuredIfOwned(ctx, svc, inferenceObjectiveGVK)
+	}
+	err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(desiredInferenceObjective(svc)),
+		client.FieldOwner(FieldOwner), client.ForceOwnership)
+	switch {
+	case meta.IsNoMatchError(err):
+		// The priority is in the spec and does nothing. Say so.
+		r.condition(svc, CondPrioritised, metav1.ConditionFalse, "InferenceObjectiveNotInstalled",
+			"the llm-d.ai InferenceObjective CRD is not installed; spec.priority has no effect")
+		return nil
+	case err != nil:
+		return fmt.Errorf("apply inferenceobjective: %w", err)
+	}
+	r.condition(svc, CondPrioritised, metav1.ConditionTrue, "ObjectiveApplied",
+		fmt.Sprintf("priority %d is set on the pool; it takes effect where the endpoint picker runs flow control", *svc.Spec.Priority))
+	return nil
+}
+
+// reportDevices copies each pod's allocated device into status. The pod's
+// ResourceClaim is created from the template by Kubernetes and owned by the
+// pod, and the scheduler writes the allocation into the claim's status.
+func (r *InferenceServiceReconciler) reportDevices(ctx context.Context, svc *servingv1alpha1.InferenceService) error {
+	if svc.Spec.DeviceClass == "" {
+		svc.Status.Devices = nil
+		return nil
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(svc.Namespace),
+		client.MatchingLabels(selectorLabels(svc))); err != nil {
+		return fmt.Errorf("list pods: %w", err)
+	}
+	mine := make(map[types.UID]string, len(pods.Items))
+	for _, p := range pods.Items {
+		mine[p.UID] = p.Name
+	}
+	var claims resourcev1.ResourceClaimList
+	if err := r.List(ctx, &claims, client.InNamespace(svc.Namespace)); err != nil {
+		return fmt.Errorf("list resource claims: %w", err)
+	}
+	var devices []servingv1alpha1.AllocatedDevice
+	for _, c := range claims.Items {
+		owner := metav1.GetControllerOf(&c)
+		if owner == nil || owner.Kind != "Pod" || c.Status.Allocation == nil {
+			continue
+		}
+		pod, ok := mine[owner.UID]
+		if !ok {
+			continue
+		}
+		for _, d := range c.Status.Allocation.Devices.Results {
+			devices = append(devices, servingv1alpha1.AllocatedDevice{
+				Pod: pod, Driver: d.Driver, Pool: d.Pool, Device: d.Device})
+		}
+	}
+	slices.SortFunc(devices, func(a, b servingv1alpha1.AllocatedDevice) int {
+		return cmp.Or(cmp.Compare(a.Pod, b.Pod), cmp.Compare(a.Device, b.Device))
+	})
+	svc.Status.Devices = devices
+	return nil
+}
+
 // deleteIfOwned removes an object this InferenceService created earlier and no
 // longer needs, such as the claim template after deviceClass is cleared.
 func (r *InferenceServiceReconciler) deleteIfOwned(ctx context.Context, svc *servingv1alpha1.InferenceService, obj client.Object, name string) error {
@@ -393,8 +470,8 @@ func (r *InferenceServiceReconciler) condition(svc *servingv1alpha1.InferenceSer
 	})
 }
 
-// SetupWithManager registers the watches. The KEDA and InferencePool watches
-// are added only when their CRDs exist at start-up, because a watch on a
+// SetupWithManager registers the watches. The KEDA, InferencePool and
+// InferenceObjective watches are added only when their CRDs exist at start-up, because a watch on a
 // missing kind stops the manager from starting.
 func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
@@ -402,7 +479,7 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&resourcev1.ResourceClaimTemplate{})
-	for _, gvk := range []schema.GroupVersionKind{scaledObjectGVK, inferencePoolGVK} {
+	for _, gvk := range []schema.GroupVersionKind{scaledObjectGVK, inferencePoolGVK, inferenceObjectiveGVK} {
 		if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
 			mgr.GetLogger().Info("CRD not installed, not watching it", "kind", gvk.Kind)
 			continue

@@ -125,7 +125,7 @@ def _sse_events(resp) -> Iterator[dict]:
 
 def complete(backend: Backend, prompt: str, max_tokens: int = 96, timeout: int = 120,
              temperature: float = 0.2, in_flight: InFlight = IN_FLIGHT,
-             cache_salt: str | None = None) -> tuple[str, CallRecord]:
+             cache_salt: str | None = None, tenant: str = "") -> tuple[str, CallRecord]:
     body: dict = {
         "model": backend.model,
         "messages": [{"role": "user", "content": prompt}],
@@ -139,9 +139,17 @@ def complete(backend: Backend, prompt: str, max_tokens: int = 96, timeout: int =
     if cache_salt and backend.prefix_cache_salt:
         body["cache_salt"] = cache_salt
     payload = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    if backend.objective:
+        # llm-d's flow control queues by the objective's priority and shares
+        # capacity between fairness ids. The tenant is the fairness id, so one
+        # team's burst waits behind its own requests, not everyone's.
+        headers["x-llm-d-inference-objective"] = backend.objective
+        if tenant:
+            headers["x-llm-d-inference-fairness-id"] = tenant
     req = urllib.request.Request(
         f"{backend.base_url.rstrip('/')}/chat/completions",
-        data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        data=payload, headers=headers, method="POST")
 
     started_with = in_flight.enter(backend.name)
     t0 = time.perf_counter()

@@ -20,7 +20,7 @@ tests and deploy it yourself.
 4. Part 4 covers starting a model without Kubernetes killing it.
 5. Part 5 covers scaling on the signal that moves first.
 6. Part 6 covers who owns the replica count, and why that needs care.
-7. Part 7 covers choosing a backend for each request, caching answers, comparing cost per answer, keeping one caller group's cached prompts from another, and attributing cost.
+7. Part 7 covers choosing a backend for each request, caching answers, comparing cost per answer, keeping one caller group's cached prompts from another, attributing cost, deciding who waits when replicas are full, and tracing one request.
 8. Part 8 shows how to run and test it.
 9. Part 9 states the design principles and lists the decision records.
 10. Part 10 lists what is unresolved.
@@ -41,10 +41,13 @@ each request to a machine that is allowed to see it.
 
 ## A note on accuracy
 
-The behaviour described here was checked against the source code of vLLM v0.31.0, KEDA v2.21.0,
-the Gateway API Inference Extension v1.6.2, the NVIDIA DRA driver v25.12.0 and Kubernetes 1.37. The
-operator runs vLLM v0.31.0 and Ollama v0.35.1. Where this guide says something was tested, Part 8
-names the test.
+The behaviour described here was checked against the source code of vLLM v0.33.0, KEDA v2.21.0,
+the Gateway API Inference Extension v1.6.2, the llm-d router v1.0.0, the NVIDIA DRA driver v25.12.0
+and Kubernetes 1.37. The operator runs vLLM v0.33.0 and Ollama v0.40.14. Where this guide says
+something was tested, Part 8 names the test.
+
+vLLM's images from v0.33.0 are built for CUDA 13 only. CUDA is NVIDIA's software layer between a
+program and the GPU, and a node whose GPU driver is too old for CUDA 13 cannot start the container.
 
 The guide simplifies how a model computes an answer. It describes the two phases at the level
 needed to understand the scaling decisions, and no deeper.
@@ -54,9 +57,11 @@ What has run, and where:
 * The operator's logic is tested against a real Kubernetes API server, the component that stores
   every object and checks it on the way in.
 * The operator has run on a three-node kind cluster on a laptop, Kubernetes 1.35, with KEDA and no
-  GPU inside the cluster. The Ollama service served a request; the vLLM service could not be
-  scheduled, as expected. It has not run on a cluster with a GPU, the graphics processor that does a
-  model's arithmetic.
+  GPU inside the cluster. The Ollama service, on v0.40.14, served a request; the vLLM service could
+  not be scheduled, as expected. With the llm-d CRD installed, a priority became an objective on the
+  pool. With the Kubernetes example DRA driver installed, which publishes pretend devices, a service
+  was given one and its status named it. It has not run on a cluster with a GPU, the graphics
+  processor that does a model's arithmetic.
 * `hack/verify.py` has run against vLLM v0.29.0 on the laptop's 4 GB GPU and the laptop's own
   Ollama, v0.9.2. Every check passed.
 * CI, the automatic checks that run on every push, builds the operator image.
@@ -64,6 +69,34 @@ What has run, and where:
 Part 10 lists what is still open.
 
 This is not a production platform. It is a small, working reference that runs on one 4 GB GPU.
+
+## See it decide, in two minutes
+
+The gateway's decisions run on any laptop, with no cluster, GPU or model:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+make demo
+```
+
+Two stand-in model servers answer with a fixed sentence. The routing, the caches and the ledger
+are the real code. Part of the output:
+
+```text
+2. hr: 'Summarise this grievance letter.'
+   Restricted data: only the approved backend may see it
+   -> qwen-restricted  (cheapest of 1 eligible (cost=833m$/Mtok, p95 TTFT=450ms))
+
+3. hr: 'Summarise this grievance letter.'
+   the same team asks again: answered from the cache, no model call
+   -> answer cache  (cheapest of 1 eligible (cost=833m$/Mtok, p95 TTFT=450ms))
+
+4. contracts: 'Summarise this grievance letter.'
+   another team asks the same thing: HR's cached answer is not theirs to see
+   -> qwen-restricted  (cheapest of 1 eligible (cost=833m$/Mtok, p95 TTFT=450ms))
+```
+
+Part 7 explains each of those decisions. Part 8 runs the rest.
 
 ## The running example
 
@@ -152,6 +185,7 @@ spec:
   gpuMemoryUtilization: 85
   weightLoadSeconds: 300
   costPerHourMilliUSD: 520
+  priority: 10
   autoscaling:
     minReplicas: 1
     maxReplicas: 3
@@ -162,7 +196,8 @@ spec:
 
 The `backend` names the program that serves the model. **vLLM** is a model server built for GPUs.
 **Ollama** is a simpler model server that runs well on a CPU. `costPerHourMilliUSD` is in
-thousandths of a dollar, so 520 means $0.52 an hour.
+thousandths of a dollar, so 520 means $0.52 an hour. `priority` is optional and says which
+model's requests go first when replicas are full; 7.7 explains it.
 
 The API server checks each InferenceService before it is stored. The checks are written in the
 **Common Expression Language (CEL)**, a small rule language the API server runs on every create
@@ -186,17 +221,18 @@ the following.
 
 | Object | Plain meaning | Fernhill's payroll model |
 |---|---|---|
-| Deployment | Runs and replaces the copies of the model server. Each copy is a **replica**, and each replica runs in a **pod**, a group of containers scheduled together | One to three pods running vLLM v0.30.0 |
+| Deployment | Runs and replaces the copies of the model server. Each copy is a **replica**, and each replica runs in a **pod**, a group of containers scheduled together | One to three pods running vLLM v0.33.0 |
 | Service | A stable address that spreads requests across the ready pods | `http://qwen-small.llm-platform.svc.cluster.local:8000/v1` |
 | ResourceClaimTemplate | The DRA request each pod makes for its device | One `gpu.nvidia.com` device with at least 3 GiB of memory |
 | ScaledObject | Instructions to KEDA, the autoscaler, on what to measure and when to add replicas | Scale on waiting requests, cache fill and first-token latency |
 | InferencePool | Registers the pods with the Gateway API Inference Extension, so a model-aware gateway can route to them | A pool of the `qwen-small` pods on port 8000 |
+| InferenceObjective | Only when `priority` is set. Tells llm-d how important this model's requests are when the pool is full | Priority 10 on the `qwen-small` pool |
 
 **KEDA** is the Kubernetes Event-driven Autoscaler. It reads a metric, such as a count from
 Prometheus, and tells the standard Kubernetes autoscaler how many replicas to run. **Prometheus**
 is the monitoring system that collects the metrics vLLM publishes.
 
-KEDA and the Inference Extension are optional. If either is not installed, the operator still
+KEDA, the Inference Extension and llm-d are optional. If one is not installed, the operator still
 builds the rest, and the InferenceService's status says what is missing. ADR-0007 records why.
 
 The status reports what the cluster says, not what the operator did. Applying a ScaledObject only
@@ -211,9 +247,13 @@ scheduler cannot place shows as `Unschedulable` with the scheduler's reason, not
 | Phase `Ready` | At least one replica is serving | `phi4-mini`, which then answered a chat request |
 | `Autoscaling=False`, `ScalerNotReady` | KEDA has the ScaledObject but says its triggers do not work | Prometheus was not at the configured address |
 | `Autoscaling=Unknown`, `WaitingForKEDA` | KEDA has not reported on the ScaledObject yet | Briefly, right after creation |
+| `Prioritised=True`, `ObjectiveApplied` | The priority is stored as an objective on the pool | `qwen-small` at priority 10, with the llm-d CRD installed |
+| `Prioritised=False`, `InferenceObjectiveNotInstalled` | A priority is set and nothing will read it | Any service with a priority on a cluster without llm-d |
+| `status.devices` | Which device the scheduler gave each pod | `gpu-0` from the example driver, on node `pa-pipeline-worker` |
 
 ADR-0009 records how running the operator on a real cluster found both of the wrong answers this
-table replaced.
+table replaced. ADR-0012 records why status names the device: a request for "one device with at
+least 3 GiB" does not say which card answered it.
 
 ### 2.3 Who does what, and why
 
@@ -223,10 +263,11 @@ others respond to live measurements. The table puts each decision where it belon
 | Task | Who does it | Why |
 |---|---|---|
 | Reject a disallowed spec | The API server, using the CRD's CEL rules | It runs on every write, so a bad spec is refused before any pod exists, even with the operator down |
-| Build and correct the five objects | The operator | One owner per object keeps the objects consistent with the spec |
+| Build and correct the objects in 2.2 | The operator | One owner per object keeps the objects consistent with the spec |
 | Set the replica count after creation | KEDA, through the Kubernetes autoscaler | Only it sees live demand; Part 6 explains how the operator keeps out of its way |
 | Choose a device for each pod | The Kubernetes scheduler, with DRA | Only the scheduler sees every node's free devices |
 | Decide when a pod is ready | The kubelet, the agent on each node, using the probes | It is on the node and checks every few seconds |
+| Decide who waits when replicas are full | llm-d's endpoint picker, using the priority the operator wrote | It sees every waiting request for the pool; a model server only sees its own queue |
 | Choose a backend for each request | The gateway's router, in `gateway/app/router.py` | Classification is a property of the request, so it must be decided per request |
 | Serve a cached answer | The gateway's semantic cache | It must sit behind the same classification boundary as the router (Part 7) |
 
@@ -551,6 +592,56 @@ HR's summary from the cache: the whole answer, not a timing hint. The cache scop
 tenant, and the contracts request goes to the model. The ledger can now also say what each team
 spent. ADR-0010 records the change, and Guide 4 walks through it.
 
+### 7.7 When replicas are full: priority and fairness
+
+A replica can serve only so many requests at once. Past that, requests wait in the model server's
+queue in the order they arrived, and a nightly batch job can sit ahead of a clerk who is waiting at
+a screen.
+
+**llm-d** is an open-source project that puts a request scheduler, the **endpoint picker**, in
+front of a pool of model servers. Its **flow control** holds requests that cannot be served yet and
+releases them by priority, sharing capacity between callers. Requests with a negative priority are
+the first to be dropped under overload.
+
+The pieces here fit that as follows:
+
+1. `spec.priority` on the InferenceService becomes an `InferenceObjective` on the service's pool
+   (2.2).
+2. The gateway adds two headers to a request for a backend behind llm-d: the objective's name, and
+   the tenant as the fairness group, so one team's burst queues behind itself.
+3. llm-d's picker does the queuing. Nothing in this repository queues or drops a request.
+
+**Example.** Fernhill sets the payroll model to priority 10 and a document-summarising batch model
+to priority -1 on the same GPUs. On a busy afternoon the payroll questions go first and the batch
+summaries wait, or are refused and retried later.
+
+The operator stores the objective and says so in status. Whether requests are actually queued by it
+depends on llm-d's picker running with flow control switched on, which has not been tried here
+(Part 10). ADR-0011 records the decision.
+
+### 7.8 Following one request: tracing
+
+The ledger adds up what each team spent. A **trace** shows one request: a timed record, called a
+**span**, that a trace viewer can display. The gateway writes one span for each request that
+reaches a backend, using the attribute names OpenTelemetry publishes for calls to language models.
+
+| On the span | Plain meaning | Example |
+|---|---|---|
+| `gen_ai.request.model`, `gen_ai.usage.*` | Which model, and how many tokens went in and came out | `qwen-small`, 9 in, 4 out |
+| `gateway.backend`, `gateway.routing.reason` | Where the request went and the router's reason | `qwen-restricted`, "cheapest of 1 eligible" |
+| `gateway.tenant`, `gateway.classification` | Whose request, and how sensitive | `hr`, `RESTRICTED` |
+| `gateway.cached`, `gateway.ttft_ms`, `gateway.cost_milli_usd` | Whether a model was called, how long the first word took, what it cost | `false`, 412, 0.31 |
+| `error.type` | The kind of failure, when the backend call failed | `BackendError` |
+
+The prompt and the answer are never on the span. More people can usually read a trace store than
+are cleared to read a Restricted prompt, and a test searches every recorded field for a salary
+figure sent in a prompt.
+
+Tracing is off unless the OpenTelemetry API package is installed
+(`pip install -e ".[tracing]"`) and the program running the gateway has configured where traces go.
+The `gen_ai.*` names are still marked as in development by OpenTelemetry and may change. ADR-0013
+records the decision.
+
 ## Part 8. Running it yourself
 
 Everything in this part runs on a laptop except the live GPU checks. Each check in 8.3 says what it
@@ -565,13 +656,16 @@ proves and what it does not.
   `gpu.nvidia.com` DeviceClass. A **DeviceClass** is a named kind of device that a DRA request
   can ask for. Making a GPU visible inside `kind` also needs NVIDIA's `nvkind` setup, which this
   repository does not automate.
-* Optionally, KEDA, Prometheus and the Gateway API Inference Extension CRDs.
+* Optionally, KEDA, Prometheus, and the Gateway API Inference Extension and llm-d CRDs.
+* To see a device claim allocated without a GPU, the Kubernetes example DRA driver
+  (`dra-example-driver`), which publishes pretend devices under the class `gpu.example.com`.
 
 ### 8.2 The commands, in the order you run them
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
+make demo       # the gateway's decisions with stand-in backends; no cluster needed
 make test       # envtest controller tests and the gateway tests
 make lint       # gofmt and ruff
 make validate   # schema check of the install manifests
@@ -593,6 +687,7 @@ To run the live checks, start vLLM with `hack/serve-vllm.sh` and Ollama on port 
 
 | Check | Plain meaning | What it covers, and what it does not |
 |---|---|---|
+| `make demo` | Sends five requests through the real gateway code to two stand-in servers | The routing, cache and ledger decisions, in a form you can read. It proves nothing about a real model |
 | `make test-go` | Runs the operator against a real Kubernetes API server and etcd, the database behind it, with no other controllers | Object shapes, field ownership, the selector change, CEL rules and the samples. No pods actually run |
 | `make test-py` | Runs the gateway's routing, cache, client and metrics code; the client tests use a real local web server | Every gateway rule. It does not talk to vLLM or Ollama |
 | `make validate` | Checks the install manifests against the Kubernetes 1.37 schemas, offline | Field names and types. It does not install anything |
@@ -657,6 +752,9 @@ example and real measurements from the laptop GPU:
 | ADR-0008 | Salt vLLM's prefix cache per tenant and classification, with a keyed hash |
 | ADR-0009 | Report KEDA's and the scheduler's verdicts in status, not the operator's own actions |
 | ADR-0010 | One entry point per request, and an answer cache divided by tenant |
+| ADR-0011 | A model's priority is an llm-d objective on its pool, and status says when nothing will read it |
+| ADR-0012 | Status names the device the scheduler gave each pod |
+| ADR-0013 | Tracing is opt-in, uses OpenTelemetry's names, and never carries the prompt |
 
 ## Part 10. What is unresolved
 
@@ -669,12 +767,15 @@ person who owns the platform.
   the operator.
 * **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
   laptop cluster nothing listened there, and the status now says so (ADR-0009).
-* **`make verify` has run on vLLM v0.29.0, not yet v0.31.0.** Every check passed on the laptop GPU, including the salt and its control. The operator pins v0.31.0, so the check is to be repeated there.
+* **`make verify` has run on vLLM v0.29.0, not v0.33.0.** Every check passed on the laptop GPU, including the salt and its control. The operator pins v0.33.0, whose source still has the same metric names, the `cache_salt` field and the FlashInfer default. v0.33.0 also turns on a new way of matching cached prefixes for some speculative decoding modes, so the salt's isolation is to be measured again there, not assumed.
+* **CUDA 13.** The v0.33.0 image needs a node driver recent enough for CUDA 13. The operator cannot see a node's driver version. A node that is too old shows up as a crash loop, which status reports with the container's last exit (Part 2.2), but the message will not say "driver".
 * **`ninja` inside the vLLM image.** On the laptop, FlashInfer's compile failed because `ninja` was
   not on `PATH`, not because of the card (ADR-0003). Whether the `vllm/vllm-openai` image the
   operator runs has `ninja` on `PATH` is unchecked.
-* **Scale-to-zero.** It needs a demand signal that exists with no replicas running, such as a
-  queue length reported by the gateway (ADR-0001).
+* **Scale-to-zero.** It needs a demand signal that exists with no replicas running. llm-d's
+  endpoint picker holding requests in its queue is one (ADR-0011); it has not been tried.
+* **Priority has been stored, not exercised.** The objective exists on the pool. No request has been
+  queued or shed by it, because that needs llm-d's picker with flow control on and real load.
 * **Throughput figures are typed in.** Cost per token needs each backend's busy throughput, which
   someone measures with a load test and enters. A figure that goes stale after a model or card
   change misprices that backend until it is measured again (ADR-0005).
@@ -684,8 +785,13 @@ person who owns the platform.
   needs a home and a rotation plan; rotating it empties every group's prefix cache once (ADR-0008).
 * **The cache's embedder.** The default compares words, not meaning. The 0.93 threshold has not
   been tuned against a real embedding model (ADR-0006).
-* **Model-aware routing.** The InferencePool is created, but routing through llm-d's endpoint
-  picker has not been tried (ADR-0007).
+* **Model-aware routing.** The InferencePool and the objective are created, but routing through
+  llm-d's endpoint picker has not been tried (ADR-0007).
+* **The NVIDIA DRA driver has moved.** The memory selector was checked against v25.12.0. The driver
+  is now released as `dra-driver-nvidia-gpu` under kubernetes-sigs, at v0.5.1, and the capacity name
+  the selector reads has not been checked there.
+* **The device in status is from the example driver.** `status.devices` has been seen with pretend
+  devices, not with a real card (ADR-0012).
 * **Prometheus labels.** The scaling queries assume Prometheus adds a `namespace` label to every
   scraped pod. A different scrape configuration needs the queries changed.
 
@@ -704,18 +810,24 @@ person who owns the platform.
 | Cost per million tokens | The hourly price divided by the tokens a replica generates in an hour when busy, times a million | Part 7.4 |
 | CrashLoopBackOff | Kubernetes' status for a container that keeps failing and being restarted | Part 4.1 |
 | CRD | CustomResourceDefinition: the definition of a new kind of Kubernetes object | Part 2.1 |
+| CUDA | NVIDIA's software layer between a program and the GPU | A note on accuracy |
 | Decode | The phase where the model writes its answer one token at a time; limited by memory bandwidth | Part 1.1 |
 | DeepCopy | Generated Go functions that copy a Kubernetes object safely | Part 8.2 |
 | Deployment | The Kubernetes object that runs and replaces copies of a program | Part 2.2 |
 | DeviceClass | A named kind of device that a DRA request can ask for | Part 8.1 |
 | DRA | Dynamic Resource Allocation: asking for a device by description rather than by count | Part 1.3 |
+| Endpoint picker | llm-d's request scheduler, which chooses a replica for each request | Part 7.7 |
 | envtest | A test harness that starts a real Kubernetes API server and etcd with no other controllers | Part 8.3 |
 | etcd | The database that holds every Kubernetes object | Part 8.3 |
+| Example DRA driver | A Kubernetes project that publishes pretend devices, for testing device claims without hardware | Part 8.1 |
+| Fairness id | The group whose requests share a queue under flow control; here, the tenant | Part 7.7 |
 | Field manager | The name the API server records as the owner of a field | Part 6.2 |
+| Flow control | Holding requests that cannot be served yet and releasing them by priority | Part 7.7 |
 | Gateway | The program that receives each request and chooses a backend for it | Part 2.4, Part 7 |
 | Gateway API Inference Extension | A Kubernetes project that lets a gateway route model traffic to the best replica | Part 2.2 |
 | GPU | The graphics processor that does a model's arithmetic | A note on accuracy, Part 1.1 |
 | HMAC | A keyed fingerprint: only someone holding the secret key can produce or predict it | Part 7.5 |
+| InferenceObjective | llm-d's object giving a pool's requests a priority | Part 2.2, Part 7.7 |
 | InferencePool | An object from the Gateway API Inference Extension listing the pods that serve a model | Part 2.2 |
 | InferenceService | This repository's object: a description of one model to serve | Part 2.1 |
 | JSON | A structured text format that other programs can read | Part 7.1 |
@@ -725,17 +837,21 @@ person who owns the platform.
 | KV cache | The model's saved working state for each request, held in GPU memory | Part 1.1, Part 5.2 |
 | Ledger | The gateway's record of every call: tokens, latency and cost | Part 3, Part 7.3 |
 | Liveness probe | A check that restarts a container that stops answering | Part 4.1 |
+| llm-d | An open-source project that schedules requests across a pool of model servers | Part 7.7 |
 | Ollama | A simple model server that runs well on a CPU | Part 2.1 |
+| OpenTelemetry | A standard for traces and metrics, with published attribute names | Part 7.8 |
 | Operator | A program in the cluster that keeps real objects in line with a description | Part 2.2 |
 | p95 | The value that 95 in 100 measurements stay under | Part 5.2 |
 | Pod | A group of containers that Kubernetes schedules together | Part 2.2 |
 | Prefill | The phase where the model reads the whole request at once; limited by arithmetic | Part 1.1 |
 | Prefix caching | Reusing the model's working notes for text that starts the same as an earlier request | Part 7.5 |
+| Priority | An integer saying whose requests go first when replicas are full; negative may be dropped | Part 2.1, Part 7.7 |
 | Probe | A small check the kubelet runs on a container on a timer | Part 4.1 |
 | Prometheus | The monitoring system that collects the metrics vLLM publishes | Part 2.2 |
 | Readiness probe | A check that removes a pod from the Service while it is not answering | Part 4.1 |
 | Reconcile | One pass of the operator, comparing the description with reality and fixing differences | Part 2.2 |
 | Replica | One running copy of the model server | Part 2.2 |
+| ResourceClaim | The object Kubernetes creates for each pod's device request; the scheduler records the chosen device in it | Part 2.2 |
 | ResourceClaimTemplate | The DRA request each pod makes for its device | Part 2.2 |
 | ScaledObject | KEDA's object: what to measure and when to add replicas | Part 2.2, Part 5.2 |
 | Scheduler | The Kubernetes component that decides which node each pod runs on | Part 1.3 |
@@ -743,12 +859,14 @@ person who owns the platform.
 | Semantic cache | A store of past answers, reused when a new request means nearly the same | Part 7.2 |
 | Server-side apply | A way of writing to Kubernetes where the API server tracks who owns each field | Part 6.2 |
 | Service | A stable network address that spreads requests across ready pods | Part 2.2 |
+| Span | One timed record in a trace | Part 7.8 |
 | Startup probe | A check that runs first and holds off the other probes until the program has started | Part 4.1 |
 | Temperature | The amount of randomness allowed in a model's answer | Part 7.2 |
 | Tenant | The group a caller belongs to, whose cached work is kept apart from other groups' | Part 7.5 |
 | Throughput | Tokens a replica generates per second when it is busy, measured with a load test | Part 7.4 |
 | Timing side channel | Learning a secret from how long something takes rather than from what it returns | Part 7.5 |
 | Token | A word or piece of a word; models read and write in tokens | Part 1.1 |
+| Trace | A timed record of one request that a trace viewer can display | Part 7.8 |
 | TTFT | Time to first token: how long a caller waits for the first word of the answer | Part 5.2, Part 7.3 |
 | Utilisation | The share of time a GPU's arithmetic units are busy | Part 1.1, Part 5.1 |
 | Vector | A list of numbers that places similar text close together | Part 7.2 |

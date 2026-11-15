@@ -13,6 +13,10 @@ that requires a tenant. Guide 4 walks through it.
 4. On a miss, the backend is called with the tenant's prefix cache salt
    (ADR-0008), and the answer is cached.
 5. Either way the call lands in the ledger under the tenant.
+
+A request that reaches a backend is traced when OpenTelemetry is configured
+(ADR-0013). The span names the backend, the reason and the tenant, and never
+holds the prompt or the answer.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from dataclasses import dataclass, field
 from .cache import CacheScope, SemanticCache, prefix_cache_salt
 from .client import IN_FLIGHT, CallRecord, InFlight, Ledger, complete
 from .router import Backend, Request, route
+from .tracing import chat_span
 
 
 @dataclass
@@ -51,18 +56,32 @@ class Gateway:
         scope = CacheScope.of(req.classification, b.model, temperature=temperature,
                               max_tokens=max_tokens, tenant=tenant)
 
-        hit = self.cache.get(req.prompt, scope)
-        if hit is not None:
-            rec = CallRecord(backend=b.name, model=b.model, prompt_tokens=0, completion_tokens=0,
-                             latency_ms=0, ttft_ms=None, cost_milli_usd=0.0, cached=True,
-                             tenant=tenant)
-            self.ledger.add(rec)
-            return Answer(hit, b.name, decision.reason, True, rec)
+        with chat_span(b.model, b.base_url, **{
+                "gen_ai.request.max_tokens": max_tokens,
+                "gen_ai.request.temperature": temperature,
+                "gateway.backend": b.name, "gateway.routing.reason": decision.reason,
+                "gateway.tenant": tenant,
+                "gateway.classification": req.classification.name}) as span:
+            hit = self.cache.get(req.prompt, scope)
+            if hit is not None:
+                rec = CallRecord(backend=b.name, model=b.model, prompt_tokens=0,
+                                 completion_tokens=0, latency_ms=0, ttft_ms=None,
+                                 cost_milli_usd=0.0, cached=True, tenant=tenant)
+                self.ledger.add(rec)
+                span.set_attribute("gateway.cached", True)
+                return Answer(hit, b.name, decision.reason, True, rec)
 
-        text, rec = complete(b, req.prompt, max_tokens=max_tokens, temperature=temperature,
-                             in_flight=self.in_flight,
-                             cache_salt=prefix_cache_salt(self.salt_key, req.classification, tenant))
-        rec.tenant = tenant
-        self.ledger.add(rec)
-        self.cache.put(req.prompt, text, scope)
-        return Answer(text, b.name, decision.reason, False, rec)
+            text, rec = complete(b, req.prompt, max_tokens=max_tokens, temperature=temperature,
+                                 in_flight=self.in_flight, tenant=tenant,
+                                 cache_salt=prefix_cache_salt(self.salt_key, req.classification,
+                                                              tenant))
+            rec.tenant = tenant
+            self.ledger.add(rec)
+            self.cache.put(req.prompt, text, scope)
+            span.set_attribute("gateway.cached", False)
+            span.set_attribute("gen_ai.usage.input_tokens", rec.prompt_tokens)
+            span.set_attribute("gen_ai.usage.output_tokens", rec.completion_tokens)
+            span.set_attribute("gateway.cost_milli_usd", rec.cost_milli_usd)
+            if rec.ttft_ms is not None:
+                span.set_attribute("gateway.ttft_ms", rec.ttft_ms)
+            return Answer(text, b.name, decision.reason, False, rec)
