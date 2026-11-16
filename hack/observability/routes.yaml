@@ -1,0 +1,96 @@
+# Direct addresses for every UI and both model APIs, with no port-forwards.
+#
+# MetalLB hands the gateway one fixed address on the kind Docker network, which
+# a Linux host can reach directly. nip.io is a public DNS service that answers
+# any name ending in <address>.nip.io with that address, so each service gets a
+# hostname without editing /etc/hosts. It needs working internet DNS.
+#
+#   http://grafana.172.18.255.200.nip.io      dashboards and traces
+#   http://prometheus.172.18.255.200.nip.io   raw metrics and queries
+#   http://headlamp.172.18.255.200.nip.io     cluster UI (token sign-in)
+#   http://qwen-small.172.18.255.200.nip.io/v1   the vLLM service's API
+#   http://phi4-mini.172.18.255.200.nip.io/v1    the Ollama service's API
+#
+# Plain HTTP with no sign-in on Grafana and Prometheus, on an address only
+# this machine can reach. For a laptop cluster and nothing else.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata: {name: kind, namespace: metallb-system}
+spec:
+  addresses: [172.18.255.200-172.18.255.200]
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata: {name: kind, namespace: metallb-system}
+spec:
+  ipAddressPools: [kind]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: envoy}
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: gateway}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: local, namespace: gateway}
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: {from: All}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: grafana, namespace: monitoring}
+spec:
+  parentRefs: [{name: local, namespace: gateway}]
+  hostnames: [grafana.172.18.255.200.nip.io]
+  rules:
+    - backendRefs: [{name: grafana, port: 80}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: prometheus, namespace: monitoring}
+spec:
+  parentRefs: [{name: local, namespace: gateway}]
+  hostnames: [prometheus.172.18.255.200.nip.io]
+  rules:
+    - backendRefs: [{name: prometheus, port: 9090}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: headlamp, namespace: headlamp}
+spec:
+  parentRefs: [{name: local, namespace: gateway}]
+  hostnames: [headlamp.172.18.255.200.nip.io]
+  rules:
+    - backendRefs: [{name: headlamp, port: 80}]
+---
+# Model APIs. A long answer streams for a while, so no request timeout.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: qwen-small, namespace: llm-platform}
+spec:
+  parentRefs: [{name: local, namespace: gateway}]
+  hostnames: [qwen-small.172.18.255.200.nip.io]
+  rules:
+    - backendRefs: [{name: qwen-small, port: 8000}]
+      timeouts: {request: 0s}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: phi4-mini, namespace: llm-platform}
+spec:
+  parentRefs: [{name: local, namespace: gateway}]
+  hostnames: [phi4-mini.172.18.255.200.nip.io]
+  rules:
+    - backendRefs: [{name: phi4-mini, port: 8000}]
+      timeouts: {request: 0s}

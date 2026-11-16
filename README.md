@@ -687,6 +687,7 @@ make deploy     # build the operator image, load it into kind, apply config/defa
 make samples    # apply the two sample InferenceServices
 
 make observability   # Prometheus, GPU metrics, traces and a Grafana dashboard
+make routes          # a hostname for each UI and model API, with no port-forwards
 make load            # a ramp of requests, to watch on the dashboard
 ```
 
@@ -720,6 +721,24 @@ gives it something to show.
 
 To open it: `kubectl -n monitoring port-forward svc/grafana 3001:80`, then
 `http://localhost:3001`. There is no sign-in, which suits a laptop and nothing else.
+
+`make routes` removes the need for port-forwards. It installs a gateway with one fixed address
+and gives each service a hostname through an **HTTPRoute**, the Gateway API object that says
+"requests for this hostname go to this Service".
+
+| Address | What is there |
+|---|---|
+| `http://grafana.172.18.255.200.nip.io` | The dashboard and the traces |
+| `http://prometheus.172.18.255.200.nip.io` | Raw metrics and queries |
+| `http://headlamp.172.18.255.200.nip.io` | A web UI for the cluster; sign in with `kubectl -n headlamp create token headlamp` |
+| `http://qwen-small.172.18.255.200.nip.io/v1` | The vLLM service's API |
+| `http://phi4-mini.172.18.255.200.nip.io/v1` | The Ollama service's API |
+
+Two pieces make that work on a laptop. **MetalLB** gives the gateway an address on the Docker
+network kind uses, which a Linux host can reach directly. **nip.io** is a public DNS service that
+answers any name ending in `172.18.255.200.nip.io` with that address, so no hosts file needs
+editing. The addresses work only from this machine, over plain HTTP. On macOS or Windows the Docker
+network is not reachable from the host, and the port-forward is still the way in.
 
 **Example: what one load ramp looked like.** `make load` steps from 1 caller to 24 against
 `qwen-small` on the 4 GB card. The model server admits 16 requests at once.

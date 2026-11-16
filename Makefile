@@ -1,5 +1,5 @@
 .PHONY: all build vet fmt generate manifests check-generated test test-go test-py lint \
-	validate cluster cluster-gpu gpu-driver observability load image deploy samples demo verify clean
+	validate cluster cluster-gpu gpu-driver observability routes load image deploy samples demo verify clean
 
 CONTROLLER_GEN_VERSION ?= v0.22.0
 ENVTEST_K8S_VERSION    ?= 1.37.x
@@ -92,7 +92,18 @@ gpu-driver:
 observability:
 	hack/observability/install.sh
 
-# A ramp of requests at vLLM on localhost:8001, to watch on the dashboard.
+# A gateway with one fixed address, and a hostname for each UI and model API,
+# so nothing needs a port-forward. MetalLB provides the address, Envoy Gateway
+# serves it. Run after `make observability`.
+routes:
+	helm repo add metallb https://metallb.github.io/metallb >/dev/null
+	helm upgrade -i metallb metallb/metallb -n metallb-system --create-namespace --version 0.16.2 --wait
+	helm upgrade -i envoy-gateway oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 \
+		-n envoy-gateway-system --create-namespace --wait
+	kubectl apply -f hack/observability/routes.yaml
+	kubectl -n gateway wait gateway/local --for=condition=Programmed --timeout=180s
+
+# A ramp of requests at vLLM, to watch on the dashboard. URL says where vLLM is.
 load:
 	.venv/bin/python hack/load.py
 
