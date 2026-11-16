@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -31,13 +32,13 @@ const (
 // reconcile, and server-side apply only changes fields the applier lists. With
 // replicas absent, the operator never touches the count the autoscaler set
 // (ADR-0004). The initial count is written once, by createDeployment.
-func desiredDeployment(svc *servingv1alpha1.InferenceService) *appsv1ac.DeploymentApplyConfiguration {
+func desiredDeployment(svc *servingv1alpha1.InferenceService, tracesEndpoint string) *appsv1ac.DeploymentApplyConfiguration {
 	var container *corev1ac.ContainerApplyConfiguration
 	switch svc.Spec.Backend {
 	case servingv1alpha1.BackendOllama:
 		container = ollamaContainer(svc)
 	default:
-		container = vllmContainer(svc)
+		container = vllmContainer(svc, tracesEndpoint)
 	}
 
 	pod := corev1ac.PodSpec().
@@ -63,10 +64,24 @@ func desiredDeployment(svc *servingv1alpha1.InferenceService) *appsv1ac.Deployme
 			WithClaims(corev1ac.ResourceClaim().WithName("gpu")))
 	}
 
+	spec := appsv1ac.DeploymentSpec()
+	if svc.Spec.DeviceClass != "" {
+		// A device is held by one pod at a time. The default rollout starts the
+		// new pod first and removes the old one when the new one is ready. With
+		// every device in use, the new pod waits for a device the old pod will
+		// not release until the new pod is ready: the rollout never finishes.
+		// Take one pod down first, then start its replacement (ADR-0015).
+		spec.WithStrategy(appsv1ac.DeploymentStrategy().
+			WithType(appsv1.RollingUpdateDeploymentStrategyType).
+			WithRollingUpdate(appsv1ac.RollingUpdateDeployment().
+				WithMaxSurge(intstr.FromInt32(0)).
+				WithMaxUnavailable(intstr.FromInt32(1))))
+	}
+
 	return appsv1ac.Deployment(svc.Name, svc.Namespace).
 		WithLabels(podLabels(svc)).
 		WithOwnerReferences(ownerRef(svc)).
-		WithSpec(appsv1ac.DeploymentSpec().
+		WithSpec(spec.
 			WithSelector(metav1ac.LabelSelector().WithMatchLabels(selectorLabels(svc))).
 			WithTemplate(corev1ac.PodTemplateSpec().
 				WithLabels(podLabels(svc)).
@@ -78,7 +93,19 @@ func desiredDeployment(svc *servingv1alpha1.InferenceService) *appsv1ac.Deployme
 				WithSpec(pod)))
 }
 
-func vllmContainer(svc *servingv1alpha1.InferenceService) *corev1ac.ContainerApplyConfiguration {
+func vllmContainer(svc *servingv1alpha1.InferenceService, tracesEndpoint string) *corev1ac.ContainerApplyConfiguration {
+	c := vllmBase(svc)
+	if tracesEndpoint != "" {
+		// vLLM then sends one trace per request: time in the queue, time to the
+		// first token, token counts. It carries no prompt or answer text
+		// (ADR-0014). The service name is what a trace viewer groups by.
+		c.WithArgs("--otlp-traces-endpoint", tracesEndpoint).
+			WithEnv(corev1ac.EnvVar().WithName("OTEL_SERVICE_NAME").WithValue(svc.Name))
+	}
+	return c
+}
+
+func vllmBase(svc *servingv1alpha1.InferenceService) *corev1ac.ContainerApplyConfiguration {
 	return corev1ac.Container().
 		WithName("vllm").
 		WithImage(vllmImage).

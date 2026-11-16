@@ -82,3 +82,11 @@ ScaledObject CRD in `internal/controller/inferenceservice_controller_test.go`.
 The names were checked again in the v0.33.0 source and are unchanged: `vllm:num_requests_waiting`,
 `vllm:kv_cache_usage_perc` and `vllm:time_to_first_token_seconds`, each labelled with `model_name`.
 v0.33.0 adds `vllm:num_requests_waiting_by_reason`, which the triggers do not use.
+
+## Measured on a real card
+
+Under a load ramp against one replica on a 4 GB GPU, NVIDIA's exporter reported the GPU as 100%
+busy while Tensor Core activity peaked at 15% and memory bandwidth use at 75%. Waiting requests
+rose from 0 to 8 once all 16 slots were full, and KEDA asked for a second replica on that signal.
+Utilisation had read 100% since eight callers, long before anything queued: it could not tell
+"busy" from "full".

@@ -779,3 +779,60 @@ func TestAllocatedDevicesAreReportedPerPod(t *testing.T) {
 		t.Errorf("status.devices = %+v, want %+v", got, want)
 	}
 }
+
+// ADR-0014. Tracing is a platform setting: with an endpoint the vLLM container
+// is told where to send traces and what to call itself; without one, neither.
+func TestTracesEndpointReachesVLLMAndNothingElse(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	oll := ollamaService(ns)
+	create(t, svc)
+	create(t, oll)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+	plain := get(t, &appsv1.Deployment{}, ns, svc.Name).Spec.Template.Spec.Containers[0]
+	if slices.Contains(plain.Args, "--otlp-traces-endpoint") {
+		t.Errorf("tracing flag set with no endpoint configured: %v", plain.Args)
+	}
+
+	const tempo = "http://tempo.monitoring.svc.cluster.local:4317"
+	r.TracesEndpoint = tempo
+	reconcileOnce(t, r, svc)
+	reconcileOnce(t, r, oll)
+	c := get(t, &appsv1.Deployment{}, ns, svc.Name).Spec.Template.Spec.Containers[0]
+	if i := slices.Index(c.Args, "--otlp-traces-endpoint"); i < 0 || c.Args[i+1] != tempo {
+		t.Errorf("args = %v, want the traces endpoint", c.Args)
+	}
+	if !slices.ContainsFunc(c.Env, func(e corev1.EnvVar) bool {
+		return e.Name == "OTEL_SERVICE_NAME" && e.Value == svc.Name
+	}) {
+		t.Errorf("env = %v, want OTEL_SERVICE_NAME=%s", c.Env, svc.Name)
+	}
+	o := get(t, &appsv1.Deployment{}, ns, oll.Name).Spec.Template.Spec.Containers[0]
+	if slices.Contains(o.Args, "--otlp-traces-endpoint") {
+		t.Error("Ollama has no such flag and must not be given it")
+	}
+}
+
+// ADR-0015. Found on the first cluster with a real GPU: changing the spec of a
+// one-replica service left the new pod Pending for ever, waiting for the device
+// the old pod still held.
+func TestAServiceHoldingADeviceReplacesPodsBeforeStartingNewOnes(t *testing.T) {
+	ns := newNamespace(t)
+	gpu, cpu := vllmService(ns), ollamaService(ns)
+	create(t, gpu)
+	create(t, cpu)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, gpu)
+	reconcileOnce(t, r, cpu)
+
+	ru := get(t, &appsv1.Deployment{}, ns, gpu.Name).Spec.Strategy.RollingUpdate
+	if ru == nil || ru.MaxSurge.IntValue() != 0 || ru.MaxUnavailable.IntValue() != 1 {
+		t.Errorf("rolling update = %+v, want maxSurge 0 and maxUnavailable 1 so a device is freed first", ru)
+	}
+	// No device, nothing to deadlock on: keep the default, which never drops capacity.
+	def := get(t, &appsv1.Deployment{}, ns, cpu.Name).Spec.Strategy.RollingUpdate
+	if def == nil || def.MaxSurge.String() != "25%" {
+		t.Errorf("CPU service rolling update = %+v, want the Kubernetes default", def)
+	}
+}

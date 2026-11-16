@@ -1,0 +1,18 @@
+# Prometheus at the address the operator and KEDA expect, plus node and
+# Kubernetes object metrics. Pod CPU, memory and network come from the
+# kubelet's cAdvisor, which this chart scrapes by default.
+alertmanager: {enabled: false}
+prometheus-pushgateway: {enabled: false}
+prometheus-node-exporter: {enabled: true}
+kube-state-metrics: {enabled: true}
+server:
+  fullnameOverride: prometheus
+  service: {servicePort: 9090}
+  persistentVolume: {enabled: false}
+  retention: 2d
+  global:
+    # Five seconds, so a burst of requests shows on the dashboard almost as it
+    # happens. Fine for one node; too chatty for a real fleet.
+    scrape_interval: 5s
+    # Must not exceed the interval: Prometheus refuses to start otherwise.
+    scrape_timeout: 4s

@@ -2,10 +2,13 @@
 """End-to-end verification against real backends. No mocks.
 
 Needs vLLM on :8001 (hack/serve-vllm.sh) and Ollama on :11434, both live.
+VLLM_URL and OLLAMA_URL point it elsewhere, for example at port-forwards to
+the two services the operator runs in a cluster.
 """
 from __future__ import annotations
 
 import dataclasses
+import os
 import pathlib
 import secrets
 import sys
@@ -19,14 +22,17 @@ from app.cache import CacheScope, SemanticCache, cosine, embed, prefix_cache_sal
 from app.client import Ledger, complete
 from app.router import Backend, Classification, NoEligibleBackend, Request, route
 
+VLLM_URL = os.getenv("VLLM_URL", "http://localhost:8001").rstrip("/")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+
 VLLM = Backend(
-    name="vllm-qwen", base_url="http://localhost:8001/v1", model="qwen-small",
+    name="vllm-qwen", base_url=f"{VLLM_URL}/v1", model="qwen-small",
     max_context=2048, max_classification=Classification.RESTRICTED,
     cost_per_hour_milli_usd=520,           # ~$0.52/h for this GPU class
     ttft_p95_ms=800, capabilities=frozenset({"chat", "json"}), prefix_cache_salt=True)
 
 OLLAMA = Backend(
-    name="ollama-phi4", base_url="http://localhost:11434/v1", model="phi4-mini",
+    name="ollama-phi4", base_url=f"{OLLAMA_URL}/v1", model="phi4-mini",
     max_context=4096, max_classification=Classification.INTERNAL,
     cost_per_hour_milli_usd=0,             # already-owned local capacity
     ttft_p95_ms=1500, capabilities=frozenset({"chat"}))
@@ -52,8 +58,8 @@ def reachable(url: str) -> bool:
 
 
 print("\n=== 0. Backend reachability (no mocks) ===")
-v_up = reachable("http://localhost:8001/v1/models")
-o_up = reachable("http://localhost:11434/api/tags")
+v_up = reachable(f"{VLLM_URL}/v1/models")
+o_up = reachable(f"{OLLAMA_URL}/api/tags")
 check("vLLM reachable on :8001", v_up)
 check("Ollama reachable on :11434", o_up)
 if not (v_up and o_up):
@@ -139,7 +145,7 @@ print("\n=== 5. Prefix cache salt (live, vLLM) ===")
 # vLLM counts prefix-cache lookups and hits in tokens. Read the counters around
 # each call: a hit count is objective, a faster first token is only suggestive.
 def prefix_hits() -> float:
-    with urllib.request.urlopen("http://localhost:8001/metrics", timeout=5) as resp:
+    with urllib.request.urlopen(f"{VLLM_URL}/metrics", timeout=5) as resp:
         text = resp.read().decode()
     return sum(float(line.rsplit(" ", 1)[1]) for line in text.splitlines()
                if line.startswith("vllm:prefix_cache_hits_total"))

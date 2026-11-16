@@ -93,3 +93,10 @@ The operator now runs vLLM v0.33.0. `VLLM_USE_FLASHINFER_SAMPLER` still defaults
 source (`vllm/envs.py`). v0.33.0 images are built for CUDA 13 only, so the question of whether
 `ninja` is on `PATH` inside the image is joined by a second one: whether the node's driver is recent
 enough for the image to start at all. Neither has been checked on a GPU node.
+
+## Checked in the v0.33.0 image
+
+On a kind cluster with the laptop's GPU passed into the node, the `vllm/vllm-openai:v0.33.0` image
+started under the operator with the sampler left on, and served requests. `which ninja` inside the
+container prints `/usr/local/bin/ninja`. The host driver, 595.99, was recent enough for the image's
+CUDA 13. Both questions above are closed for this image and this card.

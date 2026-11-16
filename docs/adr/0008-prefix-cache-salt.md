@@ -57,3 +57,11 @@ The `cache_salt` field is still in the chat completion request in the v0.33.0 so
 maximum length of 1,024 characters, so the 43-character salt is accepted. v0.33.0 turns on a new way
 of matching cached prefixes for some speculative decoding modes. The live measurement was made on
 v0.29.0 and is to be repeated on v0.33.0 before the isolation is relied on there.
+
+## Measured on vLLM v0.33.0
+
+`hack/verify.py` section 5 was run against vLLM v0.33.0 serving from the GPU inside the cluster.
+A prompt of about 403 tokens: the first call hit 0 cached tokens, a second call from the same group
+hit 336, a call with the same text from another group hit 0, and the control without a salt hit
+336. The isolation holds on v0.33.0 with the operator's default flags. It has not been measured
+with speculative decoding switched on.

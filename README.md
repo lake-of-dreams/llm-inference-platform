@@ -21,7 +21,7 @@ tests and deploy it yourself.
 5. Part 5 covers scaling on the signal that moves first.
 6. Part 6 covers who owns the replica count, and why that needs care.
 7. Part 7 covers choosing a backend for each request, caching answers, comparing cost per answer, keeping one caller group's cached prompts from another, attributing cost, deciding who waits when replicas are full, and tracing one request.
-8. Part 8 shows how to run and test it.
+8. Part 8 shows how to run and test it, on a cluster with a GPU, and how to watch a workload.
 9. Part 9 states the design principles and lists the decision records.
 10. Part 10 lists what is unresolved.
 
@@ -42,7 +42,7 @@ each request to a machine that is allowed to see it.
 ## A note on accuracy
 
 The behaviour described here was checked against the source code of vLLM v0.33.0, KEDA v2.21.0,
-the Gateway API Inference Extension v1.6.2, the llm-d router v1.0.0, the NVIDIA DRA driver v25.12.0
+the Gateway API Inference Extension v1.6.2, the llm-d router v1.0.0, the NVIDIA DRA driver v0.5.1
 and Kubernetes 1.37. The operator runs vLLM v0.33.0 and Ollama v0.40.14. Where this guide says
 something was tested, Part 8 names the test.
 
@@ -56,14 +56,16 @@ What has run, and where:
 
 * The operator's logic is tested against a real Kubernetes API server, the component that stores
   every object and checks it on the way in.
-* The operator has run on a three-node kind cluster on a laptop, Kubernetes 1.35, with KEDA and no
-  GPU inside the cluster. The Ollama service, on v0.40.14, served a request; the vLLM service could
-  not be scheduled, as expected. With the llm-d CRD installed, a priority became an objective on the
-  pool. With the Kubernetes example DRA driver installed, which publishes pretend devices, a service
-  was given one and its status named it. It has not run on a cluster with a GPU, the graphics
-  processor that does a model's arithmetic.
-* `hack/verify.py` has run against vLLM v0.29.0 on the laptop's 4 GB GPU and the laptop's own
-  Ollama, v0.9.2. Every check passed.
+* The operator has run on a two-node kind cluster on a laptop, Kubernetes 1.37, with the laptop's
+  one 4 GB GPU passed into the worker node. A GPU is the graphics processor that does a model's
+  arithmetic. The NVIDIA DRA driver published the card as `gpu-0` with 4,094 MiB. The vLLM service
+  claimed it, loaded the model and served requests, and its status named the device. The Ollama
+  service, on v0.40.14, served from the CPU. KEDA reported its scaler ready against a real
+  Prometheus. With the llm-d CRD installed, a priority became an objective on the pool.
+* `hack/verify.py` has run against those two services in the cluster, through port-forwards: vLLM
+  v0.33.0 on the GPU and Ollama v0.40.14. Every check passed, including the prefix cache salt and
+  its control.
+* It has not run on more than one GPU, or on a data-centre card.
 * CI, the automatic checks that run on every push, builds the operator image.
 
 Part 10 lists what is still open.
@@ -239,21 +241,28 @@ The status reports what the cluster says, not what the operator did. Applying a 
 proves the API server stored it. So the operator reads KEDA's own verdict back, and a pod the
 scheduler cannot place shows as `Unschedulable` with the scheduler's reason, not as loading.
 
-| Phase or condition | Plain meaning | Seen on a laptop cluster with no GPU |
+| Phase or condition | Plain meaning | Seen on the laptop clusters |
 |---|---|---|
-| Phase `Loading` | Pods exist and are starting; weights may take minutes | `phi4-mini` while Ollama pulled its model |
-| Phase `Unschedulable` | No node can take the pod; the reason is the scheduler's | `qwen-small`: "device class gpu.nvidia.com does not exist" |
+| Phase `Loading` | Pods exist and are starting; weights may take minutes | `qwen-small` for about 80 seconds while vLLM loaded weights onto the GPU |
+| Phase `Unschedulable` | No node can take the pod; the reason is the scheduler's | `qwen-small` on a cluster with no GPU driver: "device class gpu.nvidia.com does not exist" |
 | Phase `Failing` | A pod was placed but its container will not start: a crash loop, a failed image pull | A model name Ollama cannot pull |
 | Phase `Ready` | At least one replica is serving | `phi4-mini`, which then answered a chat request |
+| `Autoscaling=True`, `ScalerReady` | KEDA can read the metrics it scales on | `qwen-small`, once Prometheus was at the configured address |
 | `Autoscaling=False`, `ScalerNotReady` | KEDA has the ScaledObject but says its triggers do not work | Prometheus was not at the configured address |
 | `Autoscaling=Unknown`, `WaitingForKEDA` | KEDA has not reported on the ScaledObject yet | Briefly, right after creation |
 | `Prioritised=True`, `ObjectiveApplied` | The priority is stored as an objective on the pool | `qwen-small` at priority 10, with the llm-d CRD installed |
 | `Prioritised=False`, `InferenceObjectiveNotInstalled` | A priority is set and nothing will read it | Any service with a priority on a cluster without llm-d |
-| `status.devices` | Which device the scheduler gave each pod | `gpu-0` from the example driver, on node `pa-pipeline-worker` |
+| `status.devices` | Which device the scheduler gave each pod | `gpu-0` from driver `gpu.nvidia.com`, on node `inference-worker` |
 
 ADR-0009 records how running the operator on a real cluster found both of the wrong answers this
 table replaced. ADR-0012 records why status names the device: a request for "one device with at
 least 3 GiB" does not say which card answered it.
+
+A service that holds a device is rolled out differently from one that does not. Kubernetes
+normally starts a new pod before removing the old one. With one GPU, the new pod waited for the
+card and the old pod kept it until the new one was ready, so the rollout never finished. A service
+with a `deviceClass` now has one pod removed first and its replacement started after. ADR-0015
+records the finding and what it costs: a one-replica GPU service is down while its weights reload.
 
 ### 2.3 Who does what, and why
 
@@ -652,11 +661,13 @@ proves and what it does not.
 * Go 1.26, and Python 3.12 or later.
 * `kind`, `kubectl` and Docker. `kind` runs a whole Kubernetes cluster inside Docker containers on
   one machine.
-* For GPU serving on the cluster: an NVIDIA GPU and the NVIDIA DRA driver, which installs the
-  `gpu.nvidia.com` DeviceClass. A **DeviceClass** is a named kind of device that a DRA request
-  can ask for. Making a GPU visible inside `kind` also needs NVIDIA's `nvkind` setup, which this
-  repository does not automate.
-* Optionally, KEDA, Prometheus, and the Gateway API Inference Extension and llm-d CRDs.
+* For GPU serving on the cluster: an NVIDIA GPU; the NVIDIA Container Toolkit set as Docker's
+  default runtime, which needs root once; `nvkind`, NVIDIA's wrapper that passes the host's GPUs
+  into a kind node; and `kind` v0.33 or later, the first that can start Kubernetes 1.37.
+  `make cluster-gpu` and `make gpu-driver` do the rest. The driver installs the `gpu.nvidia.com`
+  DeviceClass. A **DeviceClass** is a named kind of device that a DRA request can ask for.
+* `helm`, for the driver, KEDA and the monitoring stack.
+* Optionally, the Gateway API Inference Extension and llm-d CRDs.
 * To see a device claim allocated without a GPU, the Kubernetes example DRA driver
   (`dra-example-driver`), which publishes pretend devices under the class `gpu.example.com`.
 
@@ -670,9 +681,13 @@ make test       # envtest controller tests and the gateway tests
 make lint       # gofmt and ruff
 make validate   # schema check of the install manifests
 
-make cluster    # create a kind cluster
+make cluster    # create a kind cluster with no GPU, or:
+make cluster-gpu gpu-driver   # one whose worker node has the host's NVIDIA GPU
 make deploy     # build the operator image, load it into kind, apply config/default
 make samples    # apply the two sample InferenceServices
+
+make observability   # Prometheus, GPU metrics, traces and a Grafana dashboard
+make load            # a ramp of requests, to watch on the dashboard
 ```
 
 `make generate manifests` regenerates three files from comments in the Go code under `api/` and
@@ -681,7 +696,58 @@ DeepCopy functions Kubernetes needs to copy objects safely. CI fails if the comm
 produces.
 
 To run the live checks, start vLLM with `hack/serve-vllm.sh` and Ollama on port 11434, then run
-`make verify`. It stops at once if either backend is down.
+`make verify`. It stops at once if either backend is down. To check the two services the operator
+runs in the cluster instead, forward a local port to each and say where they are:
+
+```bash
+kubectl -n llm-platform port-forward svc/qwen-small 8001:8000 &
+kubectl -n llm-platform port-forward svc/phi4-mini 11435:8000 &
+OLLAMA_URL=http://localhost:11435 make verify
+```
+
+### 8.4 Watching a workload: GPU, tokens, memory and network on one page
+
+`make observability` installs a monitoring stack sized for a laptop cluster. `make load` then
+gives it something to show.
+
+| Piece | Plain meaning | What it adds |
+|---|---|---|
+| Prometheus | Collects numbers from every pod, here every five seconds | The store the dashboard, KEDA and the operator all read |
+| dcgm-exporter | NVIDIA's GPU metrics exporter | Utilisation, Tensor Core activity, memory, power, temperature |
+| node-exporter, kube-state-metrics, cAdvisor | Standard node and pod metrics | Memory, CPU and network for every pod and node |
+| Tempo | Stores traces | One trace per vLLM request and one per model start-up (ADR-0014) |
+| Grafana | Draws dashboards | "GPU workload activity": the GPU, the model server, the pods and the node on one time axis |
+
+To open it: `kubectl -n monitoring port-forward svc/grafana 3001:80`, then
+`http://localhost:3001`. There is no sign-in, which suits a laptop and nothing else.
+
+**Example: what one load ramp looked like.** `make load` steps from 1 caller to 24 against
+`qwen-small` on the 4 GB card. The model server admits 16 requests at once.
+
+| Callers | Tokens written per second | What the dashboard showed |
+|---|---|---|
+| 1 | 88 | One request running, none waiting |
+| 4 | 350 | |
+| 8 | 657 | |
+| 16 | 1,179 | Every slot full |
+| 24 | 1,197 | 16 running and 8 waiting: more callers, no more tokens |
+
+Three things on the page are worth looking at during that run:
+
+1. **"GPU busy" read 100% while Tensor Core activity peaked at 15% and memory bandwidth at 75%.**
+   The card was working flat out, and the limit was moving weights through memory, not arithmetic.
+   This is Part 1.1 measured on real hardware, and it is why ADR-0001 does not scale on GPU
+   utilisation.
+2. **Waiting requests rose to 8, and KEDA asked for a second replica.** The new pod stayed
+   `Pending`: the cluster has one GPU and the first replica holds it. The autoscaler was right
+   about demand and the scheduler was right about supply.
+3. **96% of prompt tokens came from the prefix cache**, because half the prompts shared a long
+   opening. The pod's network traffic peaked at a few hundred bytes a second: tokens are tiny.
+
+Each request also leaves a trace with its time in the queue, the time spent reading the prompt,
+the time spent writing the answer and the token counts. A model start-up leaves one too, with a
+span per stage. Neither holds prompt or answer text, which was checked by sending a marker word in
+a prompt and searching the stored trace for it.
 
 ### 8.3 What each check proves
 
@@ -755,23 +821,24 @@ example and real measurements from the laptop GPU:
 | ADR-0011 | A model's priority is an llm-d objective on its pool, and status says when nothing will read it |
 | ADR-0012 | Status names the device the scheduler gave each pod |
 | ADR-0013 | Tracing is opt-in, uses OpenTelemetry's names, and never carries the prompt |
+| ADR-0014 | The operator can tell every vLLM server where to send its request and start-up traces |
+| ADR-0015 | A service that holds a device has a pod taken down before its replacement starts |
 
 ## Part 10. What is unresolved
 
 These are the known gaps. Each needs either a test on real hardware or a decision from the
 person who owns the platform.
 
-* **No GPU inside the cluster yet.** The operator has run on a kind cluster: the Ollama sample
-  reached `Ready` and answered a request, and the vLLM sample correctly reports `Unschedulable`,
-  because kind here has no NVIDIA runtime or DRA driver. A vLLM pod has still never started under
-  the operator.
+* **One small GPU.** Everything on real hardware ran on one 4 GB laptop card in a kind cluster.
+  Nothing here has run on a data-centre card, on several GPUs, or on a multi-node GPU cluster.
+* **A scaled-up replica with no device waits silently.** Under load KEDA asked for a second replica
+  and the pod stayed `Pending`, because the only GPU was in use. Status still read `Ready`, since
+  one replica was serving. Nothing reports that demand exceeded the devices available.
+* **A rollout of a one-replica GPU service means downtime.** The old pod is removed before the new
+  one loads its weights (ADR-0015).
 * **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
   laptop cluster nothing listened there, and the status now says so (ADR-0009).
-* **`make verify` has run on vLLM v0.29.0, not v0.33.0.** Every check passed on the laptop GPU, including the salt and its control. The operator pins v0.33.0, whose source still has the same metric names, the `cache_salt` field and the FlashInfer default. v0.33.0 also turns on a new way of matching cached prefixes for some speculative decoding modes, so the salt's isolation is to be measured again there, not assumed.
 * **CUDA 13.** The v0.33.0 image needs a node driver recent enough for CUDA 13. The operator cannot see a node's driver version. A node that is too old shows up as a crash loop, which status reports with the container's last exit (Part 2.2), but the message will not say "driver".
-* **`ninja` inside the vLLM image.** On the laptop, FlashInfer's compile failed because `ninja` was
-  not on `PATH`, not because of the card (ADR-0003). Whether the `vllm/vllm-openai` image the
-  operator runs has `ninja` on `PATH` is unchecked.
 * **Scale-to-zero.** It needs a demand signal that exists with no replicas running. llm-d's
   endpoint picker holding requests in its queue is one (ADR-0011); it has not been tried.
 * **Priority has been stored, not exercised.** The objective exists on the pool. No request has been
@@ -787,11 +854,8 @@ person who owns the platform.
   been tuned against a real embedding model (ADR-0006).
 * **Model-aware routing.** The InferencePool and the objective are created, but routing through
   llm-d's endpoint picker has not been tried (ADR-0007).
-* **The NVIDIA DRA driver has moved.** The memory selector was checked against v25.12.0. The driver
-  is now released as `dra-driver-nvidia-gpu` under kubernetes-sigs, at v0.5.1, and the capacity name
-  the selector reads has not been checked there.
-* **The device in status is from the example driver.** `status.devices` has been seen with pretend
-  devices, not with a real card (ADR-0012).
+* **The gateway's traces and vLLM's are separate.** The gateway does not pass a trace context to
+  the backend, so one request shows as two unrelated traces (ADR-0014).
 * **Prometheus labels.** The scaling queries assume Prometheus adds a `namespace` label to every
   scraped pod. A different scrape configuration needs the queries changed.
 
@@ -802,6 +866,7 @@ person who owns the platform.
 | ADR | Architecture decision record: a short note of one decision and why it was made | Part 9 |
 | API server | The Kubernetes component that stores every object and checks it on the way in | A note on accuracy, Part 2.1 |
 | Cache salt | A string mixed into vLLM's prefix cache so that only requests carrying the same salt share cached work | Part 7.5 |
+| cAdvisor | The part of the kubelet that measures each container's CPU, memory and network | Part 8.4 |
 | CEL | Common Expression Language, the rule language the API server runs to check objects | Part 2.1 |
 | CI | Continuous integration: the automatic checks that run on every push | A note on accuracy, Part 8.2 |
 | Classification | How sensitive a request's data is: Public, Internal or Restricted | Part 2.1, Part 7.1 |
@@ -811,6 +876,7 @@ person who owns the platform.
 | CrashLoopBackOff | Kubernetes' status for a container that keeps failing and being restarted | Part 4.1 |
 | CRD | CustomResourceDefinition: the definition of a new kind of Kubernetes object | Part 2.1 |
 | CUDA | NVIDIA's software layer between a program and the GPU | A note on accuracy |
+| dcgm-exporter | NVIDIA's program that publishes GPU measurements for Prometheus | Part 8.4 |
 | Decode | The phase where the model writes its answer one token at a time; limited by memory bandwidth | Part 1.1 |
 | DeepCopy | Generated Go functions that copy a Kubernetes object safely | Part 8.2 |
 | Deployment | The Kubernetes object that runs and replaces copies of a program | Part 2.2 |
@@ -826,6 +892,7 @@ person who owns the platform.
 | Gateway | The program that receives each request and chooses a backend for it | Part 2.4, Part 7 |
 | Gateway API Inference Extension | A Kubernetes project that lets a gateway route model traffic to the best replica | Part 2.2 |
 | GPU | The graphics processor that does a model's arithmetic | A note on accuracy, Part 1.1 |
+| Grafana | A program that draws dashboards from stored measurements | Part 8.4 |
 | HMAC | A keyed fingerprint: only someone holding the secret key can produce or predict it | Part 7.5 |
 | InferenceObjective | llm-d's object giving a pool's requests a priority | Part 2.2, Part 7.7 |
 | InferencePool | An object from the Gateway API Inference Extension listing the pods that serve a model | Part 2.2 |
@@ -838,6 +905,7 @@ person who owns the platform.
 | Ledger | The gateway's record of every call: tokens, latency and cost | Part 3, Part 7.3 |
 | Liveness probe | A check that restarts a container that stops answering | Part 4.1 |
 | llm-d | An open-source project that schedules requests across a pool of model servers | Part 7.7 |
+| nvkind | NVIDIA's wrapper around kind that passes the host's GPUs into a node | Part 8.1 |
 | Ollama | A simple model server that runs well on a CPU | Part 2.1 |
 | OpenTelemetry | A standard for traces and metrics, with published attribute names | Part 7.8 |
 | Operator | A program in the cluster that keeps real objects in line with a description | Part 2.2 |
@@ -862,7 +930,9 @@ person who owns the platform.
 | Span | One timed record in a trace | Part 7.8 |
 | Startup probe | A check that runs first and holds off the other probes until the program has started | Part 4.1 |
 | Temperature | The amount of randomness allowed in a model's answer | Part 7.2 |
+| Tempo | A store for traces | Part 8.4 |
 | Tenant | The group a caller belongs to, whose cached work is kept apart from other groups' | Part 7.5 |
+| Tensor Core activity | The share of time the GPU's matrix units were working; the honest measure of model arithmetic | Part 8.4 |
 | Throughput | Tokens a replica generates per second when it is busy, measured with a load test | Part 7.4 |
 | Timing side channel | Learning a secret from how long something takes rather than from what it returns | Part 7.5 |
 | Token | A word or piece of a word; models read and write in tokens | Part 1.1 |

@@ -1,0 +1,10 @@
+# Tempo stores request traces. Single binary, local storage, two days: enough
+# to look at what a laptop cluster did this afternoon.
+tempo:
+  retention: 48h
+  receivers:
+    otlp:
+      protocols:
+        grpc: {endpoint: "0.0.0.0:4317"}
+        http: {endpoint: "0.0.0.0:4318"}
+persistence: {enabled: false}

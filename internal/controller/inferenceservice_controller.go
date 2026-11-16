@@ -60,6 +60,10 @@ type InferenceServiceReconciler struct {
 
 	// PrometheusAddress is where KEDA reads vLLM metrics from.
 	PrometheusAddress string
+
+	// TracesEndpoint is an OTLP address vLLM sends request traces to. Empty
+	// means vLLM is started without tracing.
+	TracesEndpoint string
 }
 
 // +kubebuilder:rbac:groups=serving.platform.io,resources=inferenceservices,verbs=get;list;watch;create;update;patch;delete
@@ -220,7 +224,7 @@ func (r *InferenceServiceReconciler) podTrouble(ctx context.Context, svc *servin
 // delete an old Deployment whose selector can no longer be changed.
 func (r *InferenceServiceReconciler) reconcileDeployment(ctx context.Context, svc *servingv1alpha1.InferenceService) (*appsv1.Deployment, bool, error) {
 	l := log.FromContext(ctx)
-	desired := desiredDeployment(svc)
+	desired := desiredDeployment(svc, r.TracesEndpoint)
 	key := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
 
 	var current appsv1.Deployment
@@ -273,7 +277,7 @@ func (r *InferenceServiceReconciler) reconcileDeployment(ctx context.Context, sv
 // count and Kubernetes would reset it to one. Under the second name the count
 // stays until the autoscaler takes it over. The second name never writes again.
 func (r *InferenceServiceReconciler) createDeployment(ctx context.Context, svc *servingv1alpha1.InferenceService) error {
-	if err := r.Apply(ctx, desiredDeployment(svc), client.FieldOwner(FieldOwner), client.ForceOwnership); err != nil {
+	if err := r.Apply(ctx, desiredDeployment(svc, r.TracesEndpoint), client.FieldOwner(FieldOwner), client.ForceOwnership); err != nil {
 		return fmt.Errorf("create deployment: %w", err)
 	}
 	initial := appsv1ac.Deployment(svc.Name, svc.Namespace).

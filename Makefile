@@ -1,5 +1,5 @@
 .PHONY: all build vet fmt generate manifests check-generated test test-go test-py lint \
-	validate cluster image deploy samples verify clean
+	validate cluster cluster-gpu gpu-driver observability load image deploy samples demo verify clean
 
 CONTROLLER_GEN_VERSION ?= v0.22.0
 ENVTEST_K8S_VERSION    ?= 1.37.x
@@ -72,6 +72,30 @@ validate: $(KUBECONFORM) $(KUSTOMIZE)
 cluster:
 	kind create cluster --name $(KIND_CLUSTER)
 
+# A kind cluster whose worker node is given the host's NVIDIA GPUs. Needs the
+# NVIDIA Container Toolkit as Docker's default runtime, nvkind, and a kind new
+# enough for the node image (v0.33 for Kubernetes 1.37).
+cluster-gpu:
+	nvkind cluster create --name $(KIND_CLUSTER) --image kindest/node:v1.37.0 \
+		--config-template hack/kind-gpu.yaml --wait 180s
+
+# The NVIDIA DRA driver publishes each GPU to the scheduler and installs the
+# gpu.nvidia.com DeviceClass.
+gpu-driver:
+	kubectl label node -l '!node-role.kubernetes.io/control-plane' --overwrite nvidia.com/gpu.present=true
+	helm upgrade -i dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
+		--version 0.5.1 --namespace dra-driver-nvidia-gpu --create-namespace \
+		--set gpuResourcesEnabledOverride=true --set maskNvidiaDriverParams=true \
+		--set resources.computeDomains.enabled=false --wait
+
+# Prometheus, GPU and node metrics, Tempo for traces, and a Grafana dashboard.
+observability:
+	hack/observability/install.sh
+
+# A ramp of requests at vLLM on localhost:8001, to watch on the dashboard.
+load:
+	.venv/bin/python hack/load.py
+
 image:
 	docker build -t $(IMG) .
 
@@ -87,7 +111,8 @@ samples:
 demo:
 	.venv/bin/python hack/demo.py
 
-# End-to-end against live backends: vLLM on :8001 and Ollama on :11434.
+# End-to-end against live backends: vLLM on :8001 and Ollama on :11434, or
+# wherever VLLM_URL and OLLAMA_URL point.
 verify:
 	.venv/bin/python hack/verify.py
 

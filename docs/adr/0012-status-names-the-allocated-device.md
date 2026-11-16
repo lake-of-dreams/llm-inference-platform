@@ -39,3 +39,10 @@ the pod, and the scheduler writes the chosen driver, pool and device into the cl
   ResourceClaim API, not of any driver, so the shape is the same.
 * The claim's `status.devices`, where a driver can report each device's health and network details,
   is not copied. It is the natural next field once a real driver is present to fill it.
+
+## Seen with the NVIDIA driver
+
+With the NVIDIA DRA driver v0.5.1 on a kind cluster holding the laptop's GPU, the vLLM service's
+status read device `gpu-0`, driver `gpu.nvidia.com`, pool `inference-worker`. The driver publishes
+the card's memory as capacity `memory` (4,094 MiB here), which is the name the memory selector in
+the claim template reads, so a `minDeviceMemory` of 3 GiB matched.

@@ -1,0 +1,14 @@
+# NVIDIA's GPU exporter: utilisation, memory, power and temperature per GPU,
+# labelled with the pod that holds the device.
+runtimeClassName: nvidia
+extraEnv:
+  - name: NVIDIA_VISIBLE_DEVICES
+    value: all
+serviceMonitor:
+  enabled: false
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9400"
+  prometheus.io/path: /metrics
+nodeSelector:
+  nvidia.com/gpu.present: "true"
