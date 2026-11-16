@@ -1,5 +1,5 @@
 .PHONY: all build vet fmt generate manifests check-generated test test-go test-py lint \
-	validate cluster cluster-gpu gpu-driver observability routes load image deploy samples demo verify clean
+	validate cluster cluster-gpu gpu-driver observability routes chat load image deploy samples demo verify clean
 
 CONTROLLER_GEN_VERSION ?= v0.22.0
 ENVTEST_K8S_VERSION    ?= 1.37.x
@@ -102,6 +102,12 @@ routes:
 		-n envoy-gateway-system --create-namespace --wait
 	kubectl apply -f hack/observability/routes.yaml
 	kubectl -n gateway wait gateway/local --for=condition=Programmed --timeout=180s
+
+# A chat window for both models, at http://chat.172.18.255.200.nip.io.
+# Run after `make routes`.
+chat:
+	kubectl apply -f hack/chat/open-webui.yaml
+	kubectl -n chat rollout status deploy/open-webui --timeout=600s
 
 # A ramp of requests at vLLM, to watch on the dashboard. URL says where vLLM is.
 load:

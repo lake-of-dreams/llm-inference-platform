@@ -688,6 +688,7 @@ make samples    # apply the two sample InferenceServices
 
 make observability   # Prometheus, GPU metrics, traces and a Grafana dashboard
 make routes          # a hostname for each UI and model API, with no port-forwards
+make chat            # a chat window with a menu of both models
 make load            # a ramp of requests, to watch on the dashboard
 ```
 
@@ -733,6 +734,18 @@ and gives each service a hostname through an **HTTPRoute**, the Gateway API obje
 | `http://headlamp.172.18.255.200.nip.io` | A web UI for the cluster; sign in with `kubectl -n headlamp create token headlamp` |
 | `http://qwen-small.172.18.255.200.nip.io/v1` | The vLLM service's API |
 | `http://phi4-mini.172.18.255.200.nip.io/v1` | The Ollama service's API |
+| `http://chat.172.18.255.200.nip.io` | After `make chat`: a chat window with a menu of both models |
+
+`make chat` deploys Open WebUI, an open-source chat interface, pointed at both services through
+their OpenAI-compatible APIs. Pick `qwen-small` or `phi4-mini:latest` from the menu and type. Keep
+the Grafana dashboard open beside it: each message shows up there as a request, a burst of tokens
+and a new trace. A model can also be called directly:
+
+```bash
+curl http://qwen-small.172.18.255.200.nip.io/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "qwen-small", "messages": [{"role": "user", "content": "What is a GPU?"}]}'
+```
 
 Two pieces make that work on a laptop. **MetalLB** gives the gateway an address on the Docker
 network kind uses, which a Linux host can reach directly. **nip.io** is a public DNS service that
