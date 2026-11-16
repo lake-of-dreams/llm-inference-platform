@@ -56,21 +56,35 @@ func desiredDeployment(svc *servingv1alpha1.InferenceService, tracesEndpoint str
 
 	// Dynamic Resource Allocation. The scheduler matches the claim against the
 	// devices each node publishes, rather than counting nvidia.com/gpu integers.
-	if svc.Spec.DeviceClass != "" {
+	switch {
+	case svc.Spec.SharedDeviceClaim != "":
+		// A claim that already exists, named directly. Every pod that names it
+		// gets the same device (ADR-0017).
+		pod.WithResourceClaims(corev1ac.PodResourceClaim().
+			WithName("gpu").
+			WithResourceClaimName(svc.Spec.SharedDeviceClaim))
+	case svc.Spec.DeviceClass != "":
+		// A template: Kubernetes makes one claim per pod from it, so each pod
+		// gets a device of its own.
 		pod.WithResourceClaims(corev1ac.PodResourceClaim().
 			WithName("gpu").
 			WithResourceClaimTemplateName(claimTemplateName(svc)))
+	}
+	if holdsDevice(svc) {
 		container.WithResources(container.Resources.
 			WithClaims(corev1ac.ResourceClaim().WithName("gpu")))
 	}
 
 	spec := appsv1ac.DeploymentSpec()
-	if svc.Spec.DeviceClass != "" {
+	if holdsDevice(svc) {
 		// A device is held by one pod at a time. The default rollout starts the
 		// new pod first and removes the old one when the new one is ready. With
 		// every device in use, the new pod waits for a device the old pod will
 		// not release until the new pod is ready: the rollout never finishes.
 		// Take one pod down first, then start its replacement (ADR-0015).
+		//
+		// On a shared device the new pod would be scheduled, but its memory
+		// would not be there: the old pod still holds its share of the card.
 		spec.WithStrategy(appsv1ac.DeploymentStrategy().
 			WithType(appsv1.RollingUpdateDeploymentStrategyType).
 			WithRollingUpdate(appsv1ac.RollingUpdateDeployment().
@@ -91,6 +105,12 @@ func desiredDeployment(svc *servingv1alpha1.InferenceService, tracesEndpoint str
 					"prometheus.io/path":   "/metrics",
 				}).
 				WithSpec(pod)))
+}
+
+// holdsDevice reports whether the service's pods run on an accelerator, either
+// one device each or one shared.
+func holdsDevice(svc *servingv1alpha1.InferenceService) bool {
+	return svc.Spec.DeviceClass != "" || svc.Spec.SharedDeviceClaim != ""
 }
 
 func vllmContainer(svc *servingv1alpha1.InferenceService, tracesEndpoint string) *corev1ac.ContainerApplyConfiguration {

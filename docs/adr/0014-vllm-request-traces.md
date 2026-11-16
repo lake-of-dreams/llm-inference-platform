@@ -34,6 +34,5 @@ Where traces go is a property of the cluster, not of a model. One collector serv
   cluster with one GPU that rollout is what exposed ADR-0015.
 
 ## Open questions
-* The gateway's own spans (ADR-0013) and vLLM's are not joined into one trace. The gateway does not
-  pass a trace context header to the backend.
+* The gateway's own spans (ADR-0013) and vLLM's were not joined into one trace. ADR-0018 joins them.
 * If the collector is down, vLLM logs export errors and keeps serving. That was not tested here.

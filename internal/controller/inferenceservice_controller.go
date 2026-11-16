@@ -47,11 +47,13 @@ const (
 	notReadyRequeue = 30 * time.Second
 
 	// Condition types reported in status.
-	CondAdmitted    = "Admitted"
-	CondReady       = "Ready"
-	CondAutoscaling = "Autoscaling"
-	CondRouting     = "Routing"
-	CondPrioritised = "Prioritised"
+	CondAdmitted = "Admitted"
+	CondReady    = "Ready"
+	// CondReplicasReady is about every replica, where CondReady is about any.
+	CondReplicasReady = "ReplicasReady"
+	CondAutoscaling   = "Autoscaling"
+	CondRouting       = "Routing"
+	CondPrioritised   = "Prioritised"
 )
 
 type InferenceServiceReconciler struct {
@@ -140,18 +142,48 @@ func (r *InferenceServiceReconciler) reconcile(ctx context.Context, svc *serving
 		return ctrl.Result{}, err
 	}
 
-	svc.Status.ReadyReplicas = dep.Status.ReadyReplicas
+	ready, wanted := dep.Status.ReadyReplicas, int32(1)
+	if dep.Spec.Replicas != nil {
+		wanted = *dep.Spec.Replicas
+	}
+	svc.Status.ReadyReplicas = ready
+	svc.Status.Replicas = wanted
 	svc.Status.Endpoint = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d/v1", svc.Name, svc.Namespace, servingPort)
-	if dep.Status.ReadyReplicas > 0 {
+
+	// Every replica ready, and every one of them on the current spec.
+	if ready >= wanted && dep.Status.UpdatedReplicas >= wanted && dep.Status.ObservedGeneration >= dep.Generation {
 		svc.Status.Phase = "Ready"
 		r.condition(svc, CondReady, metav1.ConditionTrue, "MinimumReplicasAvailable", "serving traffic")
+		r.condition(svc, CondReplicasReady, metav1.ConditionTrue, "AllReplicasReady",
+			fmt.Sprintf("%d of %d replicas ready", ready, wanted))
 		l.V(1).Info("reconciled", "phase", svc.Status.Phase)
 		return ctrl.Result{RequeueAfter: driftRequeue}, nil
 	}
+
 	phase, reason, msg, err := r.podTrouble(ctx, svc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	if ready > 0 {
+		// Serving, but short of what was asked for. "Ready" alone would hide a
+		// replica the autoscaler added that no GPU is free for, and a rollout
+		// that has stopped part-way.
+		svc.Status.Phase = "Degraded"
+		r.condition(svc, CondReady, metav1.ConditionTrue, "MinimumReplicasAvailable", "serving traffic")
+		switch {
+		case phase != "":
+		case dep.Status.UpdatedReplicas < wanted || dep.Status.ObservedGeneration < dep.Generation:
+			reason, msg = "RolloutInProgress", "replicas are being replaced with the new spec"
+		default:
+			reason, msg = "WeightsLoading", "a replica is still loading"
+		}
+		r.condition(svc, CondReplicasReady, metav1.ConditionFalse, reason,
+			fmt.Sprintf("%d of %d replicas ready: %s", ready, wanted, msg))
+		l.V(1).Info("reconciled", "phase", svc.Status.Phase)
+		return ctrl.Result{RequeueAfter: notReadyRequeue}, nil
+	}
+	r.condition(svc, CondReplicasReady, metav1.ConditionFalse, "NoReplicasReady",
+		fmt.Sprintf("0 of %d replicas ready", wanted))
 	if phase != "" {
 		// Not loading. Nothing will start until something changes, and the
 		// scheduler's or the kubelet's own words say what.
@@ -179,7 +211,7 @@ var failingReasons = map[string]bool{
 	"RunContainerError":          true,
 }
 
-// podTrouble looks at this service's pods while none is ready. It returns the
+// podTrouble looks at this service's pods while some are not ready. It returns the
 // phase, condition reason and message for the first pod that will not start
 // without a change, or empty strings if every pod looks like it is still
 // loading. The scheduler's verdict comes first: an unplaced pod has no
@@ -394,7 +426,7 @@ func (r *InferenceServiceReconciler) reconcilePriority(ctx context.Context, svc 
 // ResourceClaim is created from the template by Kubernetes and owned by the
 // pod, and the scheduler writes the allocation into the claim's status.
 func (r *InferenceServiceReconciler) reportDevices(ctx context.Context, svc *servingv1alpha1.InferenceService) error {
-	if svc.Spec.DeviceClass == "" {
+	if !holdsDevice(svc) {
 		svc.Status.Devices = nil
 		return nil
 	}
@@ -413,17 +445,28 @@ func (r *InferenceServiceReconciler) reportDevices(ctx context.Context, svc *ser
 	}
 	var devices []servingv1alpha1.AllocatedDevice
 	for _, c := range claims.Items {
-		owner := metav1.GetControllerOf(&c)
-		if owner == nil || owner.Kind != "Pod" || c.Status.Allocation == nil {
+		if c.Status.Allocation == nil {
 			continue
 		}
-		pod, ok := mine[owner.UID]
-		if !ok {
-			continue
+		// A claim made from the template belongs to one pod. A shared claim
+		// belongs to nobody and lists the pods using it in reservedFor.
+		var users []string
+		if c.Name == svc.Spec.SharedDeviceClaim {
+			for _, ref := range c.Status.ReservedFor {
+				if pod, ok := mine[ref.UID]; ok && ref.Resource == "pods" {
+					users = append(users, pod)
+				}
+			}
+		} else if owner := metav1.GetControllerOf(&c); owner != nil && owner.Kind == "Pod" {
+			if pod, ok := mine[owner.UID]; ok {
+				users = append(users, pod)
+			}
 		}
-		for _, d := range c.Status.Allocation.Devices.Results {
-			devices = append(devices, servingv1alpha1.AllocatedDevice{
-				Pod: pod, Driver: d.Driver, Pool: d.Pool, Device: d.Device})
+		for _, pod := range users {
+			for _, d := range c.Status.Allocation.Devices.Results {
+				devices = append(devices, servingv1alpha1.AllocatedDevice{
+					Pod: pod, Driver: d.Driver, Pool: d.Pool, Device: d.Device})
+			}
 		}
 	}
 	slices.SortFunc(devices, func(a, b servingv1alpha1.AllocatedDevice) int {
@@ -458,14 +501,18 @@ func (r *InferenceServiceReconciler) deleteUnstructuredIfOwned(ctx context.Conte
 func policyViolation(svc *servingv1alpha1.InferenceService) string {
 	s := svc.Spec
 	switch {
+	case s.SharedDeviceClaim != "" && s.Classification == servingv1alpha1.ClassificationRestricted:
+		return "Restricted data may not run on a shared device: processes sharing a GPU have no memory isolation"
+	case s.SharedDeviceClaim != "" && s.DeviceClass != "":
+		return "set deviceClass for a device of the service's own, or sharedDeviceClaim to share one, not both"
 	case s.Classification == servingv1alpha1.ClassificationRestricted && s.DeviceClass == "":
 		return "Restricted classification requires an explicit deviceClass"
 	case s.Backend == servingv1alpha1.BackendOllama && s.Classification == servingv1alpha1.ClassificationRestricted:
 		return "Ollama backend is not approved for Restricted data"
 	case s.Backend == servingv1alpha1.BackendOllama && s.ToolCallParser != "":
 		return "toolCallParser only applies to the vLLM backend"
-	case s.Backend != servingv1alpha1.BackendOllama && s.DeviceClass == "":
-		return "vLLM backend requires a deviceClass: the vLLM image is built for CUDA and does not serve on CPU"
+	case s.Backend != servingv1alpha1.BackendOllama && s.DeviceClass == "" && s.SharedDeviceClaim == "":
+		return "vLLM backend requires a deviceClass or a sharedDeviceClaim: the vLLM image is built for CUDA and does not serve on CPU"
 	}
 	return ""
 }

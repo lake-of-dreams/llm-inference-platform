@@ -561,14 +561,19 @@ func hasVolume(dep *appsv1.Deployment, name string) bool {
 // The samples in config/samples are what a reader applies first. Each one must
 // pass the CRD's schema and CEL rules.
 func TestSamplesAreAdmitted(t *testing.T) {
-	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", "*.yaml"))
+	// Two sets: a card per service, and one card shared. They use the same
+	// names, so each set goes into a namespace of its own.
+	for _, set := range []string{"", "shared-gpu"} {
+		t.Run("samples/"+set, func(t *testing.T) { admitSamples(t, set) })
+	}
+}
+
+func admitSamples(t *testing.T, set string) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "config", "samples", set, "*.yaml"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no samples found: %v", err)
 	}
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "llm-platform"}}
-	if err := k8s.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
-		t.Fatal(err)
-	}
+	ns := newNamespace(t)
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
@@ -578,6 +583,7 @@ func TestSamplesAreAdmitted(t *testing.T) {
 		if err := yaml.Unmarshal(raw, &u.Object); err != nil {
 			t.Fatalf("%s: %v", f, err)
 		}
+		u.SetNamespace(ns)
 		if err := k8s.Create(ctx, u); err != nil {
 			t.Errorf("%s rejected: %v", filepath.Base(f), err)
 		}
@@ -865,5 +871,193 @@ func TestToolCallParserTurnsOnToolCallingInVLLM(t *testing.T) {
 	oll.Spec.ToolCallParser = "hermes"
 	if err := k8s.Create(ctx, oll); err == nil || !strings.Contains(err.Error(), "only applies to the vLLM backend") {
 		t.Errorf("an Ollama service with a tool-call parser should be refused at admission, got %v", err)
+	}
+}
+
+func sharedClaim(t *testing.T, ns, name string) *resourcev1.ResourceClaim {
+	t.Helper()
+	c := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{
+			Requests: []resourcev1.DeviceRequest{{Name: "gpu", Exactly: &resourcev1.ExactDeviceRequest{
+				DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1,
+			}}},
+		}},
+	}
+	if err := k8s.Create(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// ADR-0017. Two services name one existing claim. Each pod template points at
+// that claim, no per-pod template is made, and status names the one device
+// under both services' pods.
+func TestTwoServicesShareOneDeviceThroughANamedClaim(t *testing.T) {
+	ns := newNamespace(t)
+	claim := sharedClaim(t, ns, "shared-gpu")
+	qwen, phi := vllmService(ns), ollamaService(ns)
+	for _, s := range []*servingv1alpha1.InferenceService{qwen, phi} {
+		s.Spec.DeviceClass, s.Spec.MinDeviceMemory = "", nil
+		s.Spec.SharedDeviceClaim = claim.Name
+		create(t, s)
+	}
+	r := reconciler(k8s)
+	reconcileOnce(t, r, qwen)
+	reconcileOnce(t, r, phi)
+
+	for _, s := range []*servingv1alpha1.InferenceService{qwen, phi} {
+		dep := get(t, &appsv1.Deployment{}, ns, s.Name)
+		pc := dep.Spec.Template.Spec.ResourceClaims
+		if len(pc) != 1 || pc[0].ResourceClaimName == nil || *pc[0].ResourceClaimName != claim.Name ||
+			pc[0].ResourceClaimTemplateName != nil {
+			t.Errorf("%s pod claims = %+v, want the shared claim by name", s.Name, pc)
+		}
+		if cc := dep.Spec.Template.Spec.Containers[0].Resources.Claims; len(cc) != 1 || cc[0].Name != "gpu" {
+			t.Errorf("%s container claims = %+v, want the gpu claim", s.Name, cc)
+		}
+		// The old pod's share of the card's memory has to be given back first.
+		if ru := dep.Spec.Strategy.RollingUpdate; ru == nil || ru.MaxSurge.IntValue() != 0 {
+			t.Errorf("%s rolling update = %+v, want maxSurge 0", s.Name, ru)
+		}
+		err := k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: claimTemplateName(s)}, &resourcev1.ResourceClaimTemplate{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("%s: a claim template exists for a service that shares a claim (err %v)", s.Name, err)
+		}
+	}
+
+	// What the scheduler writes once both pods are placed.
+	var reserved []resourcev1.ResourceClaimConsumerReference
+	for _, s := range []*servingv1alpha1.InferenceService{qwen, phi} {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: s.Name + "-abc", Namespace: ns, Labels: podLabels(s)},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: vllmImage}}},
+		}
+		if err := k8s.Create(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		reserved = append(reserved, resourcev1.ResourceClaimConsumerReference{Resource: "pods", Name: p.Name, UID: p.UID})
+	}
+	claim.Status.Allocation = &resourcev1.AllocationResult{Devices: resourcev1.DeviceAllocationResult{
+		Results: []resourcev1.DeviceRequestAllocationResult{{
+			Request: "gpu", Driver: "gpu.nvidia.com", Pool: "worker-1", Device: "gpu-0",
+		}},
+	}}
+	claim.Status.ReservedFor = reserved
+	if err := k8s.Status().Update(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []*servingv1alpha1.InferenceService{qwen, phi} {
+		reconcileOnce(t, r, s)
+		got := get(t, &servingv1alpha1.InferenceService{}, ns, s.Name).Status.Devices
+		want := []servingv1alpha1.AllocatedDevice{{Pod: s.Name + "-abc", Driver: "gpu.nvidia.com", Pool: "worker-1", Device: "gpu-0"}}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s status.devices = %+v, want %+v", s.Name, got, want)
+		}
+	}
+}
+
+// ADR-0017. Nothing fences one process's GPU memory from another's on a shared
+// card, so Restricted data is refused there, at admission and in the operator.
+func TestSharedDeviceRulesAtAdmissionAndInTheOperator(t *testing.T) {
+	ns := newNamespace(t)
+	cases := map[string]func(*servingv1alpha1.InferenceService){
+		"restricted on a shared device": func(s *servingv1alpha1.InferenceService) {
+			s.Spec.Classification = servingv1alpha1.ClassificationRestricted
+			s.Spec.DeviceClass, s.Spec.MinDeviceMemory = "", nil
+			s.Spec.SharedDeviceClaim = "shared-gpu"
+		},
+		"own device and shared device": func(s *servingv1alpha1.InferenceService) {
+			s.Spec.SharedDeviceClaim = "shared-gpu"
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc := vllmService(ns)
+			svc.Name = strings.ReplaceAll(name, " ", "-")
+			mutate(svc)
+			if policyViolation(svc) == "" {
+				t.Error("the operator's own check accepted it")
+			}
+			if err := k8s.Create(ctx, svc); !apierrors.IsInvalid(err) {
+				t.Fatalf("want Invalid, got %v", err)
+			}
+		})
+	}
+
+	ok := vllmService(ns)
+	ok.Spec.DeviceClass, ok.Spec.MinDeviceMemory = "", nil
+	ok.Spec.SharedDeviceClaim = "shared-gpu"
+	if msg := policyViolation(ok); msg != "" {
+		t.Errorf("vLLM on a shared claim rejected: %s", msg)
+	}
+	create(t, ok)
+}
+
+// A service with one replica serving and one the scheduler cannot place used to
+// read "Ready". It serves, so Ready stays true, and ReplicasReady says what is
+// missing in the scheduler's words.
+func TestAReplicaThatCannotBePlacedShowsAsDegraded(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns) // minReplicas 2
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+
+	setStatus := func(ready, updated int32) {
+		t.Helper()
+		dep := get(t, &appsv1.Deployment{}, ns, svc.Name)
+		dep.Status.Replicas, dep.Status.ReadyReplicas, dep.Status.AvailableReplicas = 2, ready, ready
+		dep.Status.UpdatedReplicas, dep.Status.ObservedGeneration = updated, dep.Generation
+		if err := k8s.Status().Update(ctx, dep); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStatus(1, 2)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: svc.Name + "-second", Namespace: ns, Labels: podLabels(svc)},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "vllm", Image: vllmImage}}},
+	}
+	if err := k8s.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	const why = "0/1 nodes are available: 1 cannot allocate all claims."
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+		Reason: corev1.PodReasonUnschedulable, Message: why,
+	}}
+	if err := k8s.Status().Update(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	if res := reconcileOnce(t, r, svc); res.RequeueAfter != notReadyRequeue {
+		t.Errorf("requeue = %v while a replica is missing, want %v", res.RequeueAfter, notReadyRequeue)
+	}
+	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	all := meta.FindStatusCondition(got.Status.Conditions, CondReplicasReady)
+	if got.Status.Phase != "Degraded" || got.Status.ReadyReplicas != 1 || got.Status.Replicas != 2 ||
+		!meta.IsStatusConditionTrue(got.Status.Conditions, CondReady) ||
+		all == nil || all.Status != metav1.ConditionFalse || all.Reason != "Unschedulable" ||
+		all.Message != "1 of 2 replicas ready: "+why {
+		t.Errorf("phase = %s, %d/%d, replicasReady = %+v", got.Status.Phase,
+			got.Status.ReadyReplicas, got.Status.Replicas, all)
+	}
+
+	// Both ready, but one still on the old spec: a rollout, not a fault.
+	if err := k8s.Delete(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	setStatus(1, 1)
+	reconcileOnce(t, r, svc)
+	got = get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	if all = meta.FindStatusCondition(got.Status.Conditions, CondReplicasReady); all.Reason != "RolloutInProgress" {
+		t.Errorf("replicasReady = %+v, want RolloutInProgress", all)
+	}
+
+	setStatus(2, 2)
+	reconcileOnce(t, r, svc)
+	got = get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	if got.Status.Phase != "Ready" || !meta.IsStatusConditionTrue(got.Status.Conditions, CondReplicasReady) {
+		t.Errorf("phase = %s, conditions = %+v; want Ready with every replica ready", got.Status.Phase, got.Status.Conditions)
 	}
 }

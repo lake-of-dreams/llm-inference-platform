@@ -104,3 +104,27 @@ def test_objective_and_fairness_headers_go_only_to_a_backend_behind_llm_d(http_s
     assert with_llmd["x-llm-d-inference-objective"] == "qwen-small"
     assert with_llmd["x-llm-d-inference-fairness-id"] == "contracts"
     assert not any(k.startswith("x-llm-d-") for k in plain)
+
+
+def test_the_backend_is_told_which_trace_the_call_belongs_to(http_server, spans):
+    seen: list = []
+    gw = gateway(http_server(answering("ok", seen)))
+    gw.handle(Request("hello"), tenant="web")
+
+    (span,) = spans()
+    ctx = span.get_span_context()
+    sent = {k.lower(): v for k, v in seen[0][0].items()}
+    # version, trace id, parent span id, flags. vLLM parents its spans on this.
+    version, trace_id, parent_id, flags = sent["traceparent"].split("-")
+    assert (version, trace_id, parent_id) == ("00", f"{ctx.trace_id:032x}", f"{ctx.span_id:016x}")
+    assert int(flags, 16) & 1, "the sampled bit tells the backend to record its side too"
+
+
+def test_a_call_outside_any_span_sends_no_trace_header(http_server):
+    from app.client import complete
+    seen: list = []
+    url = http_server(answering("ok", seen))
+    b = Backend("vllm", url + "/v1", "qwen-small", max_context=4096,
+                max_classification=Classification.INTERNAL, cost_per_hour_milli_usd=0)
+    complete(b, "hello", in_flight=InFlight())
+    assert "traceparent" not in {k.lower() for k in seen[0][0]}

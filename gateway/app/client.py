@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from .router import Backend
+from .tracing import inject_trace_context
 
 
 class BackendError(RuntimeError):
@@ -147,6 +148,7 @@ def complete(backend: Backend, prompt: str, max_tokens: int = 96, timeout: int =
         headers["x-llm-d-inference-objective"] = backend.objective
         if tenant:
             headers["x-llm-d-inference-fairness-id"] = tenant
+    inject_trace_context(headers)
     req = urllib.request.Request(
         f"{backend.base_url.rstrip('/')}/chat/completions",
         data=payload, headers=headers, method="POST")

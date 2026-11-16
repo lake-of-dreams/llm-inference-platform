@@ -1,0 +1,15 @@
+# One GPU, claimed once, for every service that names this claim. Made by
+# whoever runs the cluster: the operator never creates or deletes it (ADR-0017).
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: shared-gpu
+  namespace: llm-platform
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 1

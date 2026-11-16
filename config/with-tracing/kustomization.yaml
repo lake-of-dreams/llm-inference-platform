@@ -1,0 +1,11 @@
+# config/default, with the operator told where vLLM sends its traces (ADR-0014).
+# `make deploy` applies this instead of config/default once Tempo is installed,
+# so redeploying the operator does not drop the flag and restart every model.
+resources:
+  - ../default
+patches:
+  - target: {kind: Deployment, name: inference-operator}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --otlp-traces-endpoint=http://tempo.monitoring.svc.cluster.local:4317

@@ -213,7 +213,9 @@ and update. They reject these combinations:
 |---|---|---|
 | Restricted needs a `deviceClass` | Restricted data must run on a named, approved kind of device | The payroll model must name `gpu.nvidia.com` |
 | Ollama cannot take Restricted data | The CPU server is not approved for Restricted data | Payroll can never be served by Ollama |
-| vLLM needs a `deviceClass` | The vLLM image is built for GPUs and cannot serve on a CPU | A vLLM model with no GPU is refused at once, not after a failed start |
+| vLLM needs a `deviceClass` or a `sharedDeviceClaim` | The vLLM image is built for GPUs and cannot serve on a CPU | A vLLM model with no GPU is refused at once, not after a failed start |
+| Restricted cannot use a `sharedDeviceClaim` | Models that share one GPU have no wall between their memory | Payroll gets a card of its own; 8.5 shows two Internal models sharing one |
+| `deviceClass` or `sharedDeviceClaim`, not both | A service has its own device or shares one | A model naming both is refused |
 | `minDeviceMemory` needs a `deviceClass` | A memory floor only makes sense for a device | The payroll model's 3 GiB floor is valid because it names `gpu.nvidia.com` |
 | `maxReplicas` ≥ `minReplicas`, and `minReplicas` ≥ 1 | The limits must make sense, and Part 5 explains why zero is not allowed | The payroll model runs between 1 and 3 replicas |
 
@@ -250,7 +252,8 @@ scheduler cannot place shows as `Unschedulable` with the scheduler's reason, not
 | Phase `Loading` | Pods exist and are starting; weights may take minutes | `qwen-small` for about 80 seconds while vLLM loaded weights onto the GPU |
 | Phase `Unschedulable` | No node can take the pod; the reason is the scheduler's | `qwen-small` on a cluster with no GPU driver: "device class gpu.nvidia.com does not exist" |
 | Phase `Failing` | A pod was placed but its container will not start: a crash loop, a failed image pull | A model name Ollama cannot pull |
-| Phase `Ready` | At least one replica is serving | `phi4-mini`, which then answered a chat request |
+| Phase `Ready` | Every replica asked for is serving, on the current spec | `phi4-mini`, which then answered a chat request |
+| Phase `Degraded` | Some replicas serve and some do not; the `ReplicasReady` condition says how many and why | `qwen-small` under load: "1 of 2 replicas ready" with the scheduler's reason, because the only GPU was in use |
 | `Autoscaling=True`, `ScalerReady` | KEDA can read the metrics it scales on | `qwen-small`, once Prometheus was at the configured address |
 | `Autoscaling=False`, `ScalerNotReady` | KEDA has the ScaledObject but says its triggers do not work | Prometheus was not at the configured address |
 | `Autoscaling=Unknown`, `WaitingForKEDA` | KEDA has not reported on the ScaledObject yet | Briefly, right after creation |
@@ -650,6 +653,12 @@ The prompt and the answer are never on the span. More people can usually read a 
 are cleared to read a Restricted prompt, and a test searches every recorded field for a salary
 figure sent in a prompt.
 
+The gateway also tells the backend which trace the call belongs to. It adds a header named
+`traceparent`, defined by the W3C Trace Context standard, holding the trace's id and the id of the
+gateway's span. vLLM reads it and files its own spans under the gateway's. On the laptop cluster
+one request showed in Tempo as one trace with two spans: `chat qwen-small` from the gateway and,
+beneath it, `llm_request` from vLLM. ADR-0018 records the decision.
+
 Tracing is off unless the OpenTelemetry API package is installed
 (`pip install -e ".[tracing]"`) and the program running the gateway has configured where traces go.
 The `gen_ai.*` names are still marked as in development by OpenTelemetry and may change. ADR-0013
@@ -685,16 +694,26 @@ make test       # envtest controller tests and the gateway tests
 make lint       # gofmt and ruff
 make validate   # schema check of the install manifests
 
-make cluster    # create a kind cluster with no GPU, or:
-make cluster-gpu gpu-driver   # one whose worker node has the host's NVIDIA GPU
-make deploy     # build the operator image, load it into kind, apply config/default
-make samples    # apply the two sample InferenceServices
+make up         # the whole GPU cluster from nothing; it runs the eight steps below
 
-make observability   # Prometheus, GPU metrics, traces and a Grafana dashboard
+make cluster-gpu     # a kind cluster whose worker node has the host's NVIDIA GPU
+make gpu-driver      # the NVIDIA DRA driver, which publishes the GPU to the scheduler
+make addons          # KEDA, and the InferencePool and InferenceObjective CRDs
+make observability   # Prometheus, GPU metrics, traces, a Grafana dashboard, Headlamp
+make deploy          # build the operator image, load it into kind, apply it
 make routes          # a hostname for each UI and model API, with no port-forwards
 make chat            # a chat window with a menu of both models
-make load            # a ramp of requests, to watch on the dashboard
+make samples-shared  # both sample models on the one GPU (8.5)
+
+make cluster    # or: a kind cluster with no GPU
+make samples    # the two samples with a card for vLLM alone and Ollama on CPU
+make load       # a ramp of requests, to watch on the dashboard
 ```
+
+Every version is pinned in the Makefile or in `hack/observability/install.sh`, and every step can
+be run again on a cluster that already has it. `make up` was checked by running each step after
+`cluster-gpu` against the live cluster: nothing changed and no model restarted. It has not been
+run from an empty machine since the cluster was first built by hand.
 
 `make generate manifests` regenerates three files from comments in the Go code under `api/` and
 `internal/`. They are the CRD, the ClusterRole that lists what the operator may touch, and the
@@ -788,6 +807,37 @@ the time spent writing the answer and the token counts. A model start-up leaves 
 span per stage. Neither holds prompt or answer text, which was checked by sending a marker word in
 a prompt and searching the stored trace for it.
 
+### 8.5 Two models on one GPU
+
+`deviceClass` gives each pod a GPU of its own. Fernhill's test cluster has one 4 GB card, so the
+vLLM model held all of it and the Ollama model ran on CPU.
+
+A **ResourceClaim** is the DRA object that says "one device, please". Several pods can name the
+same claim. The scheduler then allocates one device for the claim, and every pod that names it
+runs on that device. The field `sharedDeviceClaim` names such a claim. Whoever runs the cluster
+creates the claim; the operator never does.
+
+```yaml
+spec:
+  backend: vLLM
+  classification: Internal
+  sharedDeviceClaim: shared-gpu
+  gpuMemoryUtilization: 40
+```
+
+The models take turns on the GPU. Nothing divides its memory between them and nothing walls one
+model's memory off from the other's. Two consequences follow. A Restricted model is refused a
+shared claim. And the shares have to be sized by hand.
+
+**Example.** The card has 4,094 MiB. vLLM takes a fixed share at start-up: 40% gave it 1,358 MiB,
+enough for 0.93 GiB of weights and a KV cache of 10,864 tokens. At 30% it loaded the weights, had
+nothing left for the cache and stopped. Ollama then took 1,342 MiB of what remained. Both models
+answered requests sent at the same moment.
+
+Notice what sharing did not do. Phi-4 mini needs 3.2 GB, so only 42% of it fitted on the GPU and
+the rest ran on CPU. It generated 17 tokens a second, the same as before. A model gains from a
+shared card only when it fits on it whole. ADR-0017 records the decision and the measurements.
+
 ### 8.3 What each check proves
 
 | Check | Plain meaning | What it covers, and what it does not |
@@ -863,6 +913,8 @@ example and real measurements from the laptop GPU:
 | ADR-0014 | The operator can tell every vLLM server where to send its request and start-up traces |
 | ADR-0015 | A service that holds a device has a pod taken down before its replacement starts |
 | ADR-0016 | Tool calling is switched on per model, by naming the parser for its tool-call format |
+| ADR-0017 | Services can share one device by naming a claim that already exists; Restricted data cannot |
+| ADR-0018 | The gateway passes its trace identity to the backend, so one request is one trace |
 
 ## Part 10. What is unresolved
 
@@ -871,9 +923,11 @@ person who owns the platform.
 
 * **One small GPU.** Everything on real hardware ran on one 4 GB laptop card in a kind cluster.
   Nothing here has run on a data-centre card, on several GPUs, or on a multi-node GPU cluster.
-* **A scaled-up replica with no device waits silently.** Under load KEDA asked for a second replica
-  and the pod stayed `Pending`, because the only GPU was in use. Status still read `Ready`, since
-  one replica was serving. Nothing reports that demand exceeded the devices available.
+* **Demand beyond the devices is reported, not solved.** Under load KEDA asked for a second replica
+  and the pod stayed `Pending`, because the only GPU was in use. Status now reads `Degraded` with
+  the scheduler's reason. Nothing adds a device or tells the autoscaler to stop asking.
+* **Shares of a shared GPU are not checked.** Two services whose memory shares exceed the card are
+  both admitted, and the second crash-loops (ADR-0017). Sharing was tried with time-slicing only.
 * **A rollout of a one-replica GPU service means downtime.** The old pod is removed before the new
   one loads its weights (ADR-0015).
 * **Prometheus is where the cluster says.** The ScaledObject's address is a start-up flag. On the
@@ -897,8 +951,8 @@ person who owns the platform.
 * **Ollama is measured from outside.** Its tokens are counted by a proxy that reads the usage
   figures each answer ends with. There is no queue depth, no cache figure and no trace for it, and
   a caller that reaches the Service directly is not counted.
-* **The gateway's traces and vLLM's are separate.** The gateway does not pass a trace context to
-  the backend, so one request shows as two unrelated traces (ADR-0014).
+* **A trace ends at the gateway for Ollama.** vLLM's spans join the gateway's (ADR-0018). Ollama
+  records none.
 * **Prometheus labels.** The scaling queries assume Prometheus adds a `namespace` label to every
   scraped pod. A different scrape configuration needs the queries changed.
 
@@ -958,6 +1012,7 @@ person who owns the platform.
 | Prefix caching | Reusing the model's working notes for text that starts the same as an earlier request | Part 7.5 |
 | Priority | An integer saying whose requests go first when replicas are full; negative may be dropped | Part 2.1, Part 7.7 |
 | Probe | A small check the kubelet runs on a container on a timer | Part 4.1 |
+| ResourceClaim | The DRA object that asks for a device; pods that name the same claim share its device | Part 8.5 |
 | Prometheus | The monitoring system that collects the metrics vLLM publishes | Part 2.2 |
 | Readiness probe | A check that removes a pod from the Service while it is not answering | Part 4.1 |
 | Reconcile | One pass of the operator, comparing the description with reality and fixing differences | Part 2.2 |
@@ -974,6 +1029,7 @@ person who owns the platform.
 | Startup probe | A check that runs first and holds off the other probes until the program has started | Part 4.1 |
 | Temperature | The amount of randomness allowed in a model's answer | Part 7.2 |
 | Tempo | A store for traces | Part 8.4 |
+| traceparent | A request header from the W3C Trace Context standard that carries a trace's id from caller to callee | Part 7.8 |
 | Tenant | The group a caller belongs to, whose cached work is kept apart from other groups' | Part 7.5 |
 | Tensor Core activity | The share of time the GPU's matrix units were working; the honest measure of model arithmetic | Part 8.4 |
 | Throughput | Tokens a replica generates per second when it is busy, measured with a load test | Part 7.4 |

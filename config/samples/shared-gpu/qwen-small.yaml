@@ -1,0 +1,27 @@
+# The vLLM model, sized to leave most of a 4 GB card to a second model.
+apiVersion: serving.platform.io/v1alpha1
+kind: InferenceService
+metadata:
+  name: qwen-small
+  namespace: llm-platform
+spec:
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  backend: vLLM
+  # Not Restricted: nothing fences one process's GPU memory from another's on a
+  # shared card, and the CRD refuses Restricted data there.
+  classification: Internal
+  sharedDeviceClaim: shared-gpu
+  # vLLM takes its share up front and keeps it. 40% of 4 GB is 1.6 GB. At 30%
+  # the weights and the runtime's own overhead used all of it and vLLM stopped
+  # with "No available memory for the cache blocks".
+  gpuMemoryUtilization: 40
+  maxModelLen: 8192
+  weightLoadSeconds: 300
+  costPerHourMilliUSD: 520
+  toolCallParser: hermes
+  priority: 10
+  autoscaling:
+    # One card, one replica. A second would need a share of memory that the
+    # other model already holds.
+    minReplicas: 1
+    maxReplicas: 1

@@ -19,10 +19,23 @@ from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 try:
-    from opentelemetry import trace
+    from opentelemetry import propagate, trace
     from opentelemetry.trace import SpanKind, Status, StatusCode
 except ImportError:  # the gateway runs without it
     trace = None
+
+
+def inject_trace_context(headers: dict[str, str]) -> None:
+    """Adds the current span's identity to an outgoing request's headers.
+
+    The header is W3C `traceparent`. A backend that traces, as vLLM does, reads
+    it and records its own spans as children of the gateway's, so one request
+    is one trace from the routing decision to the last token (ADR-0018). It
+    holds two random ids and a flag, nothing about the request. With no span
+    open, or no OpenTelemetry installed, nothing is added.
+    """
+    if trace is not None:
+        propagate.inject(headers)
 
 
 class _NoSpan:

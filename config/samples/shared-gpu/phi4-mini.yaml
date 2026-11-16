@@ -1,0 +1,13 @@
+# The Ollama model on the same card. Ollama puts as many layers on the GPU as
+# the free memory holds and runs the rest on CPU.
+apiVersion: serving.platform.io/v1alpha1
+kind: InferenceService
+metadata:
+  name: phi4-mini
+  namespace: llm-platform
+spec:
+  model: phi4-mini
+  backend: Ollama
+  classification: Internal
+  sharedDeviceClaim: shared-gpu
+  weightLoadSeconds: 900

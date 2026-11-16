@@ -32,6 +32,9 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .status.replicas
+      name: Wanted
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -197,6 +200,17 @@ spec:
                   means no objective. ADR-0011.
                 format: int32
                 type: integer
+              sharedDeviceClaim:
+                description: |-
+                  SharedDeviceClaim names a ResourceClaim that already exists in the
+                  namespace. Every pod of this service, and of any other service that names
+                  the same claim, runs on the device that claim was allocated. The pods
+                  take turns on the GPU and nothing fences one's memory from another's, so
+                  the services must be sized to fit together and Restricted data is refused.
+                  The claim is made by whoever runs the cluster, not by the operator: who
+                  may share a card is a platform decision. ADR-0017.
+                maxLength: 253
+                type: string
               toolCallParser:
                 description: |-
                   ToolCallParser turns on tool calling in vLLM and names the parser that
@@ -219,14 +233,23 @@ spec:
             - model
             type: object
             x-kubernetes-validations:
+            - message: 'Restricted data may not run on a shared device: processes
+                sharing a GPU have no memory isolation'
+              rule: '!has(self.sharedDeviceClaim) || size(self.sharedDeviceClaim)
+                == 0 || self.classification != ''Restricted'''
+            - message: set deviceClass for a device of the service's own, or sharedDeviceClaim
+                to share one, not both
+              rule: '!has(self.sharedDeviceClaim) || size(self.sharedDeviceClaim)
+                == 0 || !has(self.deviceClass) || size(self.deviceClass) == 0'
             - message: Restricted classification requires an explicit deviceClass
               rule: self.classification != 'Restricted' || (has(self.deviceClass)
                 && size(self.deviceClass) > 0)
             - message: Ollama backend is not approved for Restricted data
               rule: self.backend != 'Ollama' || self.classification != 'Restricted'
-            - message: 'vLLM backend requires a deviceClass: the vLLM image is built
-                for CUDA and does not serve on CPU'
+            - message: 'vLLM backend requires a deviceClass or a sharedDeviceClaim:
+                the vLLM image is built for CUDA and does not serve on CPU'
               rule: self.backend != 'vLLM' || (has(self.deviceClass) && size(self.deviceClass)
+                > 0) || (has(self.sharedDeviceClaim) && size(self.sharedDeviceClaim)
                 > 0)
             - message: minDeviceMemory only applies with a deviceClass
               rule: '!has(self.minDeviceMemory) || (has(self.deviceClass) && size(self.deviceClass)
@@ -331,6 +354,13 @@ spec:
               phase:
                 type: string
               readyReplicas:
+                format: int32
+                type: integer
+              replicas:
+                description: |-
+                  Replicas is how many pods the Deployment is asked to run, as last set by
+                  the autoscaler. Ready below this means a replica is still loading, cannot
+                  be scheduled or is failing, and the ReplicasReady condition says which.
                 format: int32
                 type: integer
             type: object

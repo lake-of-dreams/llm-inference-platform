@@ -1,5 +1,6 @@
 .PHONY: all build vet fmt generate manifests check-generated test test-go test-py lint \
-	validate cluster cluster-gpu gpu-driver observability routes chat load image deploy samples demo verify clean
+	validate up cluster cluster-gpu gpu-driver addons observability routes chat load image deploy samples \
+	samples-shared demo verify clean
 
 CONTROLLER_GEN_VERSION ?= v0.22.0
 ENVTEST_K8S_VERSION    ?= 1.37.x
@@ -69,6 +70,12 @@ validate: $(KUBECONFORM) $(KUSTOMIZE)
 	$(KUSTOMIZE) build config/default | \
 		$(KUBECONFORM) -strict -summary -kubernetes-version 1.37.0 -ignore-missing-schemas -
 
+# The whole laptop cluster from nothing, in the order the pieces depend on each
+# other: a GPU node, the driver that publishes the GPU, the add-ons the
+# operator talks to, the monitoring stack, the operator, the hostnames, the
+# chat window, and both models on the one card. Every step is safe to run again.
+up: cluster-gpu gpu-driver addons observability deploy routes chat samples-shared
+
 cluster:
 	kind create cluster --name $(KIND_CLUSTER)
 
@@ -88,7 +95,16 @@ gpu-driver:
 		--set gpuResourcesEnabledOverride=true --set maskNvidiaDriverParams=true \
 		--set resources.computeDomains.enabled=false --wait
 
-# Prometheus, GPU and node metrics, Tempo for traces, and a Grafana dashboard.
+# What the operator works with but does not install: KEDA, which scales on the
+# vLLM metrics, and the two CRDs it writes routing and priority objects to.
+addons:
+	helm repo add kedacore https://kedacore.github.io/charts >/dev/null
+	helm upgrade -i keda kedacore/keda -n keda --create-namespace --version 2.21.0 --wait
+	kubectl apply --server-side -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/v1.6.2/config/crd/bases/inference.networking.k8s.io_inferencepools.yaml
+	kubectl apply --server-side -f https://raw.githubusercontent.com/llm-d/llm-d-router/v1.0.0/config/crd/bases/llm-d.ai_inferenceobjectives.yaml
+
+# Prometheus, GPU and node metrics, Tempo for traces, a Grafana dashboard and
+# the Headlamp cluster UI.
 observability:
 	hack/observability/install.sh
 
@@ -116,13 +132,27 @@ load:
 image:
 	docker build -t $(IMG) .
 
+# With Tempo installed, the operator is deployed with the traces flag
+# (config/with-tracing); without it, plain config/default.
 deploy: image
 	kind load docker-image $(IMG) --name $(KIND_CLUSTER)
-	kubectl apply -k config/default
+	if kubectl -n monitoring get svc tempo >/dev/null 2>&1; then \
+		kubectl apply -k config/with-tracing; else kubectl apply -k config/default; fi
+	kubectl -n inference-system rollout restart deploy/inference-operator
+	kubectl -n inference-system rollout status deploy/inference-operator --timeout=180s
 
 samples:
 	kubectl create namespace llm-platform --dry-run=client -o yaml | kubectl apply -f -
 	kubectl apply -f config/samples/
+
+# Both models on one GPU through a shared claim (ADR-0017). vLLM goes first and
+# takes its fixed share; Ollama then fits what it can into the rest.
+samples-shared:
+	kubectl create namespace llm-platform --dry-run=client -o yaml | kubectl apply -f -
+	kubectl apply -f config/samples/shared-gpu/claim.yaml -f config/samples/shared-gpu/qwen-small.yaml
+	kubectl -n llm-platform wait isvc/qwen-small --for=jsonpath='{.status.phase}'=Ready --timeout=900s
+	kubectl apply -f config/samples/shared-gpu/phi4-mini.yaml
+	kubectl -n llm-platform wait isvc/phi4-mini --for=jsonpath='{.status.phase}'=Ready --timeout=1200s
 
 # The gateway's decisions with stand-in backends. No cluster, GPU or model.
 demo:

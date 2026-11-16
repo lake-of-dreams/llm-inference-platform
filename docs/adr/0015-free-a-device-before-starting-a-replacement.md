@@ -33,7 +33,8 @@ device to hold.
   as the operator applied the new strategy.
 
 ## Open questions
-* While a rollout is stuck or a replica is down for a rollout, status still reads `Ready` if any
-  old replica serves. Status does not yet say a rollout is in progress.
+* While a rollout was stuck or a replica was down for a rollout, status still read `Ready` if any
+  old replica served. Status now reads `Degraded`, and the `ReplicasReady` condition gives the
+  reason `RolloutInProgress`.
 * Where spare devices exist, starting the new pod first would be better. The operator cannot see
   free devices today; the scheduler can.

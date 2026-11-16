@@ -46,9 +46,11 @@ const (
 // deviceClass is rejected before a pod exists, and the rule still holds while
 // the operator is down.
 //
+// +kubebuilder:validation:XValidation:rule="!has(self.sharedDeviceClaim) || size(self.sharedDeviceClaim) == 0 || self.classification != 'Restricted'",message="Restricted data may not run on a shared device: processes sharing a GPU have no memory isolation"
+// +kubebuilder:validation:XValidation:rule="!has(self.sharedDeviceClaim) || size(self.sharedDeviceClaim) == 0 || !has(self.deviceClass) || size(self.deviceClass) == 0",message="set deviceClass for a device of the service's own, or sharedDeviceClaim to share one, not both"
 // +kubebuilder:validation:XValidation:rule="self.classification != 'Restricted' || (has(self.deviceClass) && size(self.deviceClass) > 0)",message="Restricted classification requires an explicit deviceClass"
 // +kubebuilder:validation:XValidation:rule="self.backend != 'Ollama' || self.classification != 'Restricted'",message="Ollama backend is not approved for Restricted data"
-// +kubebuilder:validation:XValidation:rule="self.backend != 'vLLM' || (has(self.deviceClass) && size(self.deviceClass) > 0)",message="vLLM backend requires a deviceClass: the vLLM image is built for CUDA and does not serve on CPU"
+// +kubebuilder:validation:XValidation:rule="self.backend != 'vLLM' || (has(self.deviceClass) && size(self.deviceClass) > 0) || (has(self.sharedDeviceClaim) && size(self.sharedDeviceClaim) > 0)",message="vLLM backend requires a deviceClass or a sharedDeviceClaim: the vLLM image is built for CUDA and does not serve on CPU"
 // +kubebuilder:validation:XValidation:rule="!has(self.minDeviceMemory) || (has(self.deviceClass) && size(self.deviceClass) > 0)",message="minDeviceMemory only applies with a deviceClass"
 // +kubebuilder:validation:XValidation:rule="!has(self.autoscaling) || self.autoscaling.maxReplicas >= self.autoscaling.minReplicas",message="maxReplicas must be >= minReplicas"
 // +kubebuilder:validation:XValidation:rule="!has(self.toolCallParser) || size(self.toolCallParser) == 0 || self.backend == 'vLLM'",message="toolCallParser only applies to the vLLM backend"
@@ -84,6 +86,17 @@ type InferenceServiceSpec struct {
 	// asks for one device of this class. Empty means no accelerator, which only
 	// the Ollama backend can use.
 	DeviceClass string `json:"deviceClass,omitempty"`
+
+	// SharedDeviceClaim names a ResourceClaim that already exists in the
+	// namespace. Every pod of this service, and of any other service that names
+	// the same claim, runs on the device that claim was allocated. The pods
+	// take turns on the GPU and nothing fences one's memory from another's, so
+	// the services must be sized to fit together and Restricted data is refused.
+	// The claim is made by whoever runs the cluster, not by the operator: who
+	// may share a card is a platform decision. ADR-0017.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	SharedDeviceClaim string `json:"sharedDeviceClaim,omitempty"`
 
 	// MinDeviceMemory is the smallest device memory the claim will accept. The
 	// scheduler then cannot place the pod on a card too small to hold the
@@ -178,10 +191,14 @@ type AllocatedDevice struct {
 }
 
 type InferenceServiceStatus struct {
-	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
-	ReadyReplicas      int32  `json:"readyReplicas,omitempty"`
-	Endpoint           string `json:"endpoint,omitempty"`
-	Phase              string `json:"phase,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	ReadyReplicas      int32 `json:"readyReplicas,omitempty"`
+	// Replicas is how many pods the Deployment is asked to run, as last set by
+	// the autoscaler. Ready below this means a replica is still loading, cannot
+	// be scheduled or is failing, and the ReplicasReady condition says which.
+	Replicas int32  `json:"replicas,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Phase    string `json:"phase,omitempty"`
 	// Devices lists what the scheduler actually allocated, per pod. A claim
 	// asks for "one device of this class with at least this much memory";
 	// this says which card answered. ADR-0012.
@@ -209,6 +226,7 @@ type InferenceServiceStatus struct {
 // +kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.classification`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Wanted",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type InferenceService struct {
 	metav1.TypeMeta   `json:",inline"`
