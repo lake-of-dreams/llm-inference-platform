@@ -43,6 +43,13 @@ spec:
             # tool schemas, and Ollama holds the whole answer back while it
             # looks for a tool call: a one-line question took 90 seconds and
             # showed nothing until the end. This is a plain chat window.
+            # The switches below turn features off. This one stops the rest of the
+            # built-in tools (time, files, knowledge search) being attached to
+            # every message: their definitions alone were over 2,000 tokens, more
+            # than a small model's whole context, so "what is the time" was
+            # refused as too long.
+            - name: DEFAULT_MODEL_METADATA
+              value: '{"capabilities": {"builtin_tools": false}}'
             - {name: ENABLE_MEMORIES, value: "False"}
             - {name: ENABLE_CODE_INTERPRETER, value: "False"}
             - {name: ENABLE_CODE_EXECUTION, value: "False"}

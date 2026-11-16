@@ -183,7 +183,7 @@ spec:
   classification: Restricted
   deviceClass: gpu.nvidia.com
   minDeviceMemory: 3Gi
-  maxModelLen: 2048
+  maxModelLen: 8192
   gpuMemoryUtilization: 85
   weightLoadSeconds: 300
   costPerHourMilliUSD: 520

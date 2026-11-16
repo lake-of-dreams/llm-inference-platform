@@ -11,7 +11,9 @@ spec:
   # Installed by the NVIDIA DRA driver.
   deviceClass: gpu.nvidia.com
   minDeviceMemory: 3Gi
-  maxModelLen: 2048
+  # Room for a conversation. The KV cache for this small model at 8,192 tokens
+  # fits the card with space to spare.
+  maxModelLen: 8192
   gpuMemoryUtilization: 85
   weightLoadSeconds: 300
   costPerHourMilliUSD: 520
