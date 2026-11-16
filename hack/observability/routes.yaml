@@ -92,5 +92,6 @@ spec:
   parentRefs: [{name: local, namespace: gateway}]
   hostnames: [phi4-mini.172.18.255.200.nip.io]
   rules:
-    - backendRefs: [{name: phi4-mini, port: 8000}]
+    # Through the token meter, so these calls show on the dashboard too.
+    - backendRefs: [{name: phi4-mini-meter, port: 8000}]
       timeouts: {request: 0s}

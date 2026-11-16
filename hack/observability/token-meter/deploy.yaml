@@ -1,0 +1,35 @@
+# The token meter in front of the Ollama service. The chat window and the
+# phi4-mini route both go through it, so every answer's tokens are counted.
+# meter.py is mounted from a ConfigMap that install.sh creates from the file.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: phi4-mini-meter, namespace: llm-platform, labels: {app: phi4-mini-meter}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: phi4-mini-meter}}
+  template:
+    metadata:
+      labels: {app: phi4-mini-meter}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: meter
+          image: python:3.14-slim
+          command: ["python", "/app/meter.py"]
+          env:
+            - {name: UPSTREAM, value: "http://phi4-mini.llm-platform.svc.cluster.local:8000"}
+          ports: [{name: http, containerPort: 8000}]
+          readinessProbe: {httpGet: {path: /metrics, port: http}, periodSeconds: 5}
+          resources: {requests: {cpu: 20m, memory: 48Mi}}
+          volumeMounts: [{name: app, mountPath: /app}]
+      volumes: [{name: app, configMap: {name: token-meter}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: phi4-mini-meter, namespace: llm-platform}
+spec:
+  selector: {app: phi4-mini-meter}
+  ports: [{name: http, port: 8000, targetPort: http}]

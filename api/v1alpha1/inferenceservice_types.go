@@ -51,6 +51,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="self.backend != 'vLLM' || (has(self.deviceClass) && size(self.deviceClass) > 0)",message="vLLM backend requires a deviceClass: the vLLM image is built for CUDA and does not serve on CPU"
 // +kubebuilder:validation:XValidation:rule="!has(self.minDeviceMemory) || (has(self.deviceClass) && size(self.deviceClass) > 0)",message="minDeviceMemory only applies with a deviceClass"
 // +kubebuilder:validation:XValidation:rule="!has(self.autoscaling) || self.autoscaling.maxReplicas >= self.autoscaling.minReplicas",message="maxReplicas must be >= minReplicas"
+// +kubebuilder:validation:XValidation:rule="!has(self.toolCallParser) || size(self.toolCallParser) == 0 || self.backend == 'vLLM'",message="toolCallParser only applies to the vLLM backend"
 type InferenceServiceSpec struct {
 	// Model is the Hugging Face ID for vLLM, or the local tag for Ollama.
 	// +kubebuilder:validation:MinLength=1
@@ -106,6 +107,15 @@ type InferenceServiceSpec struct {
 
 	// +kubebuilder:default={}
 	Autoscaling AutoscalingSpec `json:"autoscaling,omitempty"`
+
+	// ToolCallParser turns on tool calling in vLLM and names the parser that
+	// reads this model's tool-call format, such as "hermes" for Qwen 2.5.
+	// Without it vLLM rejects any request whose tool choice is "auto", which
+	// is what chat clients send as soon as they offer the model a tool. The
+	// right parser depends on the model, so there is no default. ADR-0016.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9_]*$`
+	// +optional
+	ToolCallParser string `json:"toolCallParser,omitempty"`
 
 	// Priority ranks this model's requests against others when a pool is
 	// saturated. Higher is more important and negative means the requests may

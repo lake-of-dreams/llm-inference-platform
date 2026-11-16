@@ -17,7 +17,7 @@ package-dir = {"" = "gateway"}
 packages = ["app"]
 
 [tool.pytest.ini_options]
-testpaths = ["gateway/tests"]
+testpaths = ["gateway/tests", "hack/observability/token-meter"]
 addopts = "-q"
 
 [tool.ruff]

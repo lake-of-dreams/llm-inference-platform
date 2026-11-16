@@ -83,9 +83,12 @@ stat("Tensor Core activity", "avg(DCGM_FI_PROF_TENSOR_UTIL_RATIO)", "percentunit
      desc="Share of time the Tensor Cores were active. The honest measure of useful model work.")
 stat("GPU memory used", "sum(DCGM_FI_DEV_FB_USED_BYTES)", "bytes", 8)
 stat("Power", "sum(DCGM_FI_DEV_BOARD_POWER_WATTS)", "watt", 12)
-stat("Tokens generated per second", 'sum(rate(vllm:generation_tokens_total[1m]))', "short", 16)
+stat("Tokens generated per second",
+     'sum(rate(vllm:generation_tokens_total[1m])) + (sum(rate(token_meter_generation_tokens_total[1m])) or vector(0))',
+     "short", 16, desc="Every model: vLLM's own count plus the token meter in front of Ollama.")
 stat("Requests running / waiting",
-     'sum(vllm:num_requests_running) + sum(vllm:num_requests_waiting)', "short", 20)
+     'sum(vllm:num_requests_running) + sum(vllm:num_requests_waiting) + (sum(token_meter_requests_running) or vector(0))',
+     "short", 20)
 next_line(4)
 
 # ---------------------------------------------------------------- GPU
@@ -115,16 +118,20 @@ graph("Energy used", [("increase(DCGM_FI_DEV_GPU_ENERGY_JOULES_TOTAL[5m])", "jou
 next_line(7)
 
 # ---------------------------------------------------------------- model server
-row("Model server (vLLM)")
+row("Model servers: vLLM, and Ollama through the token meter")
 graph("Requests", [(f"sum by (model_name) (vllm:num_requests_running{{{NS}}})", "running {{model_name}}"),
-                   (f"sum by (model_name) (vllm:num_requests_waiting{{{NS}}})", "waiting {{model_name}}")],
-      "short", 0, desc="Waiting is the signal the autoscaler scales on.")
+                   (f"sum by (model_name) (vllm:num_requests_waiting{{{NS}}})", "waiting {{model_name}}"),
+                   (f"sum by (model_name) (token_meter_requests_running{{{NS}}})", "in flight {{model_name}}")],
+      "short", 0, desc="Waiting is the signal the autoscaler scales on. Ollama reports no queue; the meter only knows how many requests are in flight.")
 graph("Tokens per second", [(f"sum by (model_name) (rate(vllm:generation_tokens_total{{{NS}}}[1m]))", "generated {{model_name}}"),
-                            (f"sum by (model_name) (rate(vllm:prompt_tokens_total{{{NS}}}[1m]))", "prompt {{model_name}}")],
-      "short", 8)
+                            (f"sum by (model_name) (rate(vllm:prompt_tokens_total{{{NS}}}[1m]))", "prompt {{model_name}}"),
+                            (f"sum by (model_name) (rate(token_meter_generation_tokens_total{{{NS}}}[1m]))", "generated {{model_name}}"),
+                            (f"sum by (model_name) (rate(token_meter_prompt_tokens_total{{{NS}}}[1m]))", "prompt {{model_name}}")],
+      "short", 8, desc="Ollama's tokens are counted as each answer finishes, so its line moves in steps.")
 graph("Time to first token", [
     (f"histogram_quantile(0.5, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{{{NS}}}[2m])))", "p50"),
-    (f"histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{{{NS}}}[2m])))", "p95")],
+    (f"histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{{{NS}}}[2m])))", "p95"),
+    (f"sum by (model_name) (rate(token_meter_first_token_seconds_total{{{NS}}}[2m])) / sum by (model_name) (rate(token_meter_first_token_count_total{{{NS}}}[2m]))", "mean {{model_name}}")],
       "s", 16)
 next_line(7)
 graph("Time between tokens", [

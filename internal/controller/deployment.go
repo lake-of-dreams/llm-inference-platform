@@ -95,6 +95,10 @@ func desiredDeployment(svc *servingv1alpha1.InferenceService, tracesEndpoint str
 
 func vllmContainer(svc *servingv1alpha1.InferenceService, tracesEndpoint string) *corev1ac.ContainerApplyConfiguration {
 	c := vllmBase(svc)
+	if p := svc.Spec.ToolCallParser; p != "" {
+		// Both flags or neither: vLLM refuses to start with only one.
+		c.WithArgs("--enable-auto-tool-choice", "--tool-call-parser", p)
+	}
 	if tracesEndpoint != "" {
 		// vLLM then sends one trace per request: time in the queue, time to the
 		// first token, token counts. It carries no prompt or answer text

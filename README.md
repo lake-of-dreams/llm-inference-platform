@@ -187,6 +187,7 @@ spec:
   gpuMemoryUtilization: 85
   weightLoadSeconds: 300
   costPerHourMilliUSD: 520
+  toolCallParser: hermes
   priority: 10
   autoscaling:
     minReplicas: 1
@@ -199,7 +200,10 @@ spec:
 The `backend` names the program that serves the model. **vLLM** is a model server built for GPUs.
 **Ollama** is a simpler model server that runs well on a CPU. `costPerHourMilliUSD` is in
 thousandths of a dollar, so 520 means $0.52 an hour. `priority` is optional and says which
-model's requests go first when replicas are full; 7.7 explains it.
+model's requests go first when replicas are full; 7.7 explains it. `toolCallParser` is optional
+too. It lets clients offer the model tools, and names the format this model writes a tool call in.
+Without it vLLM refuses any request that says the model may choose a tool, which is the first
+thing a chat window sends (ADR-0016).
 
 The API server checks each InferenceService before it is stored. The checks are written in the
 **Common Expression Language (CEL)**, a small rule language the API server runs on every create
@@ -718,6 +722,7 @@ gives it something to show.
 | dcgm-exporter | NVIDIA's GPU metrics exporter | Utilisation, Tensor Core activity, memory, power, temperature |
 | node-exporter, kube-state-metrics, cAdvisor | Standard node and pod metrics | Memory, CPU and network for every pod and node |
 | Tempo | Stores traces | One trace per vLLM request and one per model start-up (ADR-0014) |
+| Token meter | A small proxy in front of the Ollama service, in `hack/observability/token-meter` | Token counts for Ollama, which publishes no metrics of its own |
 | Grafana | Draws dashboards | "GPU workload activity": the GPU, the model server, the pods and the node on one time axis |
 
 To open it: `kubectl -n monitoring port-forward svc/grafana 3001:80`, then
@@ -737,7 +742,9 @@ and gives each service a hostname through an **HTTPRoute**, the Gateway API obje
 | `http://chat.172.18.255.200.nip.io` | After `make chat`: a chat window with a menu of both models |
 
 `make chat` deploys Open WebUI, an open-source chat interface, pointed at both services through
-their OpenAI-compatible APIs. Pick `qwen-small` or `phi4-mini:latest` from the menu and type. Keep
+their OpenAI-compatible APIs. Its built-in tools are switched off: attached to every message,
+they made a one-line question to the CPU model take 90 seconds with nothing on screen until the
+end. Pick `qwen-small` or `phi4-mini:latest` from the menu and type. Keep
 the Grafana dashboard open beside it: each message shows up there as a request, a burst of tokens
 and a new trace. A model can also be called directly:
 
@@ -855,6 +862,7 @@ example and real measurements from the laptop GPU:
 | ADR-0013 | Tracing is opt-in, uses OpenTelemetry's names, and never carries the prompt |
 | ADR-0014 | The operator can tell every vLLM server where to send its request and start-up traces |
 | ADR-0015 | A service that holds a device has a pod taken down before its replacement starts |
+| ADR-0016 | Tool calling is switched on per model, by naming the parser for its tool-call format |
 
 ## Part 10. What is unresolved
 
@@ -886,6 +894,9 @@ person who owns the platform.
   been tuned against a real embedding model (ADR-0006).
 * **Model-aware routing.** The InferencePool and the objective are created, but routing through
   llm-d's endpoint picker has not been tried (ADR-0007).
+* **Ollama is measured from outside.** Its tokens are counted by a proxy that reads the usage
+  figures each answer ends with. There is no queue depth, no cache figure and no trace for it, and
+  a caller that reaches the Service directly is not counted.
 * **The gateway's traces and vLLM's are separate.** The gateway does not pass a trace context to
   the backend, so one request shows as two unrelated traces (ADR-0014).
 * **Prometheus labels.** The scaling queries assume Prometheus adds a `namespace` label to every

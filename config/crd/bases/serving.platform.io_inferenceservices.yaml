@@ -197,6 +197,15 @@ spec:
                   means no objective. ADR-0011.
                 format: int32
                 type: integer
+              toolCallParser:
+                description: |-
+                  ToolCallParser turns on tool calling in vLLM and names the parser that
+                  reads this model's tool-call format, such as "hermes" for Qwen 2.5.
+                  Without it vLLM rejects any request whose tool choice is "auto", which
+                  is what chat clients send as soon as they offer the model a tool. The
+                  right parser depends on the model, so there is no default. ADR-0016.
+                pattern: ^[a-z0-9_]*$
+                type: string
               weightLoadSeconds:
                 default: 600
                 description: |-
@@ -224,6 +233,9 @@ spec:
                 > 0)'
             - message: maxReplicas must be >= minReplicas
               rule: '!has(self.autoscaling) || self.autoscaling.maxReplicas >= self.autoscaling.minReplicas'
+            - message: toolCallParser only applies to the vLLM backend
+              rule: '!has(self.toolCallParser) || size(self.toolCallParser) == 0 ||
+                self.backend == ''vLLM'''
           status:
             properties:
               conditions:

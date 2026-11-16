@@ -9,6 +9,7 @@
 #                   memory, power, temperature
 #   node-exporter, kube-state-metrics, and the kubelet's cAdvisor
 #                   node and pod CPU, memory and network
+#   token meter     counts tokens for Ollama, which publishes no metrics itself
 #   Tempo           stores the traces vLLM sends
 #   Grafana         dashboards; no sign-in, for a laptop cluster only
 #
@@ -31,6 +32,11 @@ python3 make_dashboard.py
 kubectl -n "$NS" create configmap dashboard-activity --from-file=dashboard-activity.json \
   --dry-run=client -o yaml | kubectl label --local -f - grafana_dashboard=1 -o yaml | kubectl apply -f -
 helm upgrade -i grafana grafana/grafana -n "$NS" -f grafana-values.yaml --wait --timeout 6m
+
+# Ollama publishes no metrics. A small proxy in front of it counts tokens.
+kubectl -n llm-platform create configmap token-meter --from-file=meter.py=token-meter/meter.py \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f token-meter/deploy.yaml
 
 # Tell the operator where traces go. Every vLLM service restarts once to pick
 # the flag up (ADR-0014).

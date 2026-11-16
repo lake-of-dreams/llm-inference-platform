@@ -836,3 +836,34 @@ func TestAServiceHoldingADeviceReplacesPodsBeforeStartingNewOnes(t *testing.T) {
 		t.Errorf("CPU service rolling update = %+v, want the Kubernetes default", def)
 	}
 }
+
+// ADR-0016. Found from a chat window: vLLM rejected "auto" tool choice because
+// it had not been started with tool calling on.
+func TestToolCallParserTurnsOnToolCallingInVLLM(t *testing.T) {
+	ns := newNamespace(t)
+	svc := vllmService(ns)
+	create(t, svc)
+	r := reconciler(k8s)
+	reconcileOnce(t, r, svc)
+	if args := get(t, &appsv1.Deployment{}, ns, svc.Name).Spec.Template.Spec.Containers[0].Args; slices.Contains(args, "--enable-auto-tool-choice") {
+		t.Errorf("tool calling is on with no parser named: %v", args)
+	}
+
+	got := get(t, &servingv1alpha1.InferenceService{}, ns, svc.Name)
+	got.Spec.ToolCallParser = "hermes"
+	if err := k8s.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOnce(t, r, svc)
+	args := get(t, &appsv1.Deployment{}, ns, svc.Name).Spec.Template.Spec.Containers[0].Args
+	i := slices.Index(args, "--tool-call-parser")
+	if !slices.Contains(args, "--enable-auto-tool-choice") || i < 0 || args[i+1] != "hermes" {
+		t.Errorf("args = %v, want both tool-calling flags with the hermes parser", args)
+	}
+
+	oll := ollamaService(ns)
+	oll.Spec.ToolCallParser = "hermes"
+	if err := k8s.Create(ctx, oll); err == nil || !strings.Contains(err.Error(), "only applies to the vLLM backend") {
+		t.Errorf("an Ollama service with a tool-call parser should be refused at admission, got %v", err)
+	}
+}

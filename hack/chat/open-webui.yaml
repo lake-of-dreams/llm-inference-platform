@@ -28,7 +28,7 @@ spec:
             # Both services speak the OpenAI API on port 8000: vLLM natively,
             # Ollama through its /v1 compatibility layer.
             - name: OPENAI_API_BASE_URLS
-              value: "http://qwen-small.llm-platform.svc.cluster.local:8000/v1;http://phi4-mini.llm-platform.svc.cluster.local:8000/v1"
+              value: "http://qwen-small.llm-platform.svc.cluster.local:8000/v1;http://phi4-mini-meter.llm-platform.svc.cluster.local:8000/v1"
             - {name: OPENAI_API_KEYS, value: "none;none"}
             - {name: ENABLE_OLLAMA_API, value: "False"}
             # Nothing here needs the public internet once the image is pulled.
@@ -37,6 +37,26 @@ spec:
             - {name: ENABLE_TAGS_GENERATION, value: "False"}
             - {name: ENABLE_FOLLOW_UP_GENERATION, value: "False"}
             - {name: DEFAULT_MODELS, value: "qwen-small"}
+            # Open WebUI's built-in tools (memory, notes, calendar, code
+            # interpreter and others) are attached to every message as tool
+            # definitions. A small model on a CPU then spends its time reading
+            # tool schemas, and Ollama holds the whole answer back while it
+            # looks for a tool call: a one-line question took 90 seconds and
+            # showed nothing until the end. This is a plain chat window.
+            - {name: ENABLE_MEMORIES, value: "False"}
+            - {name: ENABLE_CODE_INTERPRETER, value: "False"}
+            - {name: ENABLE_CODE_EXECUTION, value: "False"}
+            - {name: ENABLE_NOTES, value: "False"}
+            - {name: ENABLE_CALENDAR, value: "False"}
+            - {name: ENABLE_AUTOMATIONS, value: "False"}
+            - {name: ENABLE_CHANNELS, value: "False"}
+            - {name: ENABLE_SUBAGENTS, value: "False"}
+            - {name: ENABLE_APPS, value: "False"}
+            - {name: ENABLE_WEB_SEARCH, value: "False"}
+            - {name: ENABLE_IMAGE_GENERATION, value: "False"}
+            - {name: ENABLE_AUTOCOMPLETE_GENERATION, value: "False"}
+            - {name: ENABLE_SEARCH_QUERY_GENERATION, value: "False"}
+            - {name: ENABLE_RETRIEVAL_QUERY_GENERATION, value: "False"}
           readinessProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 5

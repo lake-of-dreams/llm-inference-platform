@@ -462,6 +462,8 @@ func policyViolation(svc *servingv1alpha1.InferenceService) string {
 		return "Restricted classification requires an explicit deviceClass"
 	case s.Backend == servingv1alpha1.BackendOllama && s.Classification == servingv1alpha1.ClassificationRestricted:
 		return "Ollama backend is not approved for Restricted data"
+	case s.Backend == servingv1alpha1.BackendOllama && s.ToolCallParser != "":
+		return "toolCallParser only applies to the vLLM backend"
 	case s.Backend != servingv1alpha1.BackendOllama && s.DeviceClass == "":
 		return "vLLM backend requires a deviceClass: the vLLM image is built for CUDA and does not serve on CPU"
 	}

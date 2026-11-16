@@ -235,7 +235,7 @@
    "id": 6,
    "type": "stat",
    "title": "Tokens generated per second",
-   "description": "",
+   "description": "Every model: vLLM's own count plus the token meter in front of Ollama.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -267,7 +267,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(rate(vllm:generation_tokens_total[1m]))",
+     "expr": "sum(rate(vllm:generation_tokens_total[1m])) + (sum(rate(token_meter_generation_tokens_total[1m])) or vector(0))",
      "refId": "A"
     }
    ]
@@ -308,7 +308,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(vllm:num_requests_running) + sum(vllm:num_requests_waiting)",
+     "expr": "sum(vllm:num_requests_running) + sum(vllm:num_requests_waiting) + (sum(token_meter_requests_running) or vector(0))",
      "refId": "A"
     }
    ]
@@ -696,7 +696,7 @@
   {
    "id": 15,
    "type": "row",
-   "title": "Model server (vLLM)",
+   "title": "Model servers: vLLM, and Ollama through the token meter",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -709,7 +709,7 @@
    "id": 16,
    "type": "timeseries",
    "title": "Requests",
-   "description": "Waiting is the signal the autoscaler scales on.",
+   "description": "Waiting is the signal the autoscaler scales on. Ollama reports no queue; the meter only knows how many requests are in flight.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -760,6 +760,15 @@
      "expr": "sum by (model_name) (vllm:num_requests_waiting{namespace=~\"$namespace\"})",
      "legendFormat": "waiting {{model_name}}",
      "refId": "B"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (model_name) (token_meter_requests_running{namespace=~\"$namespace\"})",
+     "legendFormat": "in flight {{model_name}}",
+     "refId": "C"
     }
    ]
   },
@@ -767,7 +776,7 @@
    "id": 17,
    "type": "timeseries",
    "title": "Tokens per second",
-   "description": "",
+   "description": "Ollama's tokens are counted as each answer finishes, so its line moves in steps.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -818,6 +827,24 @@
      "expr": "sum by (model_name) (rate(vllm:prompt_tokens_total{namespace=~\"$namespace\"}[1m]))",
      "legendFormat": "prompt {{model_name}}",
      "refId": "B"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (model_name) (rate(token_meter_generation_tokens_total{namespace=~\"$namespace\"}[1m]))",
+     "legendFormat": "generated {{model_name}}",
+     "refId": "C"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (model_name) (rate(token_meter_prompt_tokens_total{namespace=~\"$namespace\"}[1m]))",
+     "legendFormat": "prompt {{model_name}}",
+     "refId": "D"
     }
    ]
   },
@@ -876,6 +903,15 @@
      "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{namespace=~\"$namespace\"}[2m])))",
      "legendFormat": "p95",
      "refId": "B"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (model_name) (rate(token_meter_first_token_seconds_total{namespace=~\"$namespace\"}[2m])) / sum by (model_name) (rate(token_meter_first_token_count_total{namespace=~\"$namespace\"}[2m]))",
+     "legendFormat": "mean {{model_name}}",
+     "refId": "C"
     }
    ]
   },
