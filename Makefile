@@ -1,6 +1,6 @@
 .PHONY: all build vet fmt generate manifests check-generated test test-go test-py lint \
 	validate up cluster cluster-gpu gpu-driver addons observability routes chat load image deploy samples \
-	samples-shared demo verify clean
+	samples-shared train flow-control priority demo verify clean
 
 CONTROLLER_GEN_VERSION ?= v0.22.0
 ENVTEST_K8S_VERSION    ?= 1.37.x
@@ -74,7 +74,7 @@ validate: $(KUBECONFORM) $(KUSTOMIZE)
 # other: a GPU node, the driver that publishes the GPU, the add-ons the
 # operator talks to, the monitoring stack, the operator, the hostnames, the
 # chat window, and both models on the one card. Every step is safe to run again.
-up: cluster-gpu gpu-driver addons observability deploy routes chat samples-shared
+up: cluster-gpu gpu-driver addons observability deploy routes chat samples-shared flow-control
 
 cluster:
 	kind create cluster --name $(KIND_CLUSTER)
@@ -153,6 +153,30 @@ samples-shared:
 	kubectl -n llm-platform wait isvc/qwen-small --for=jsonpath='{.status.phase}'=Ready --timeout=900s
 	kubectl apply -f config/samples/shared-gpu/phi4-mini.yaml
 	kubectl -n llm-platform wait isvc/phi4-mini --for=jsonpath='{.status.phase}'=Ready --timeout=1200s
+
+# A small model trained from scratch on the shared GPU, beside both model
+# servers. Loss and tokens per second show on the dashboard. Needs
+# `make samples-shared`, for the claim it shares.
+train:
+	kubectl -n llm-platform create configmap train-tiny-lm --from-file=train.py=hack/train/train.py \
+		--dry-run=client -o yaml | kubectl apply -f -
+	kubectl -n llm-platform delete job train-tiny-lm --ignore-not-found
+	kubectl apply -f hack/train/job.yaml
+	kubectl -n llm-platform wait pod -l app.kubernetes.io/name=train-tiny-lm --for=condition=Ready --timeout=300s
+	kubectl -n llm-platform logs -f job/train-tiny-lm
+
+# llm-d's endpoint picker in front of the qwen-small pool, with flow control on
+# (ADR-0020). The chart's own InferencePool is dropped: the operator owns it.
+# Run after `make routes` and `make samples-shared`.
+flow-control:
+	helm template qwen-small oci://ghcr.io/llm-d/charts/llm-d-router-standalone --version v1.0.0 \
+		-n llm-platform -f hack/llm-d/values.yaml | hack/llm-d/without-pool.py | kubectl apply -f -
+	kubectl -n llm-platform rollout status deploy/qwen-small-epp --timeout=300s
+	kubectl apply -f hack/llm-d/objectives.yaml
+
+# Batch requests first, interactive ones behind them: who is answered first.
+priority:
+	.venv/bin/python hack/priority.py
 
 # The gateway's decisions with stand-in backends. No cluster, GPU or model.
 demo:

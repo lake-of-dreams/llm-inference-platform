@@ -1,0 +1,62 @@
+# llm-d's endpoint picker in front of the qwen-small pool, with flow control on.
+# Rendered by `make flow-control`; ADR-0020 explains the choices.
+router:
+  modelServers:
+    # The labels the operator puts on a service's pods. The picker itself reads
+    # them from the operator's InferencePool; the chart needs them to render.
+    matchLabels:
+      app.kubernetes.io/name: inference-service
+      app.kubernetes.io/instance: qwen-small
+    targetPorts:
+      - number: 8000
+  epp:
+    # The chart's defaults ask for 8 CPUs and 8 GiB, sized for a production pool.
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {memory: 1Gi}
+    pluginsConfigFile: flow-control.yaml
+    pluginsCustomConfig:
+      flow-control.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        # Off by default. With it on, a request the pool has no room for waits
+        # in the picker and leaves in priority order, not in vLLM's own queue
+        # in arrival order.
+        featureGates:
+        - flowControl
+        plugins:
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: prefix-cache-scorer
+        - type: metrics-data-source
+          parameters:
+            scheme: "http"
+            path: "/metrics"
+            insecureSkipVerify: true
+        - type: core-metrics-extractor
+        # Full means four requests in flight per replica. vLLM would take
+        # sixteen; four makes the queue easy to see on one small card and keeps
+        # time to first token short for whoever is let through.
+        - name: pool-concurrency
+          type: concurrency-detector
+          parameters:
+            concurrencyMode: requests
+            maxConcurrency: 4
+        schedulingProfiles:
+        - name: default
+          plugins:
+          - pluginRef: queue-scorer
+            weight: 2
+          - pluginRef: kv-cache-utilization-scorer
+            weight: 2
+          - pluginRef: prefix-cache-scorer
+            weight: 3
+        flowControl:
+          # How long a request may wait for room before it is turned away.
+          defaultRequestTTL: "60s"
+          saturationDetector:
+            pluginRef: pool-concurrency
+  proxy:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}

@@ -1268,7 +1268,7 @@
   {
    "id": 26,
    "type": "row",
-   "title": "Pods: memory, CPU and network",
+   "title": "Training: the job from `make train`",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -1280,8 +1280,8 @@
   {
    "id": 27,
    "type": "timeseries",
-   "title": "Memory in use, by pod",
-   "description": "CPU-side memory. GPU memory is in the GPU row.",
+   "title": "Loss",
+   "description": "Both should fall. Held-out loss levelling off while training loss keeps falling means the model has started memorising its text.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1294,7 +1294,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "bytes",
+     "unit": "short",
      "custom": {
       "lineWidth": 2,
       "fillOpacity": 10,
@@ -1320,17 +1320,26 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\",pod=~\"$pod\",container!=\"\",container!=\"POD\"})",
-     "legendFormat": "{{pod}}",
+     "expr": "train_loss{namespace=~\"$namespace\"}",
+     "legendFormat": "training batch",
      "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "train_validation_loss{namespace=~\"$namespace\"}",
+     "legendFormat": "held-out text",
+     "refId": "B"
     }
    ]
   },
   {
    "id": 28,
    "type": "timeseries",
-   "title": "CPU, by pod",
-   "description": "Cores in use.",
+   "title": "Tokens trained on per second",
+   "description": "Dips when a model server on the same card answers a request: the two take turns.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1369,7 +1378,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",pod=~\"$pod\",container!=\"\",container!=\"POD\"}[2m]))",
+     "expr": "train_tokens_per_second{namespace=~\"$namespace\"}",
      "legendFormat": "{{pod}}",
      "refId": "A"
     }
@@ -1377,6 +1386,174 @@
   },
   {
    "id": 29,
+   "type": "timeseries",
+   "title": "GPU memory held by the job",
+   "description": "The job caps itself at a share of the card, so it fails before a neighbour does.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 16,
+    "y": 51
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "train_gpu_memory_allocated_bytes{namespace=~\"$namespace\"}",
+     "legendFormat": "peak allocated",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "train_gpu_memory_limit_bytes{namespace=~\"$namespace\"}",
+     "legendFormat": "the job's own cap",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "id": 30,
+   "type": "row",
+   "title": "Pods: memory, CPU and network",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 58
+   }
+  },
+  {
+   "id": 31,
+   "type": "timeseries",
+   "title": "Memory in use, by pod",
+   "description": "CPU-side memory. GPU memory is in the GPU row.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 0,
+    "y": 59
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=~\"$namespace\",pod=~\"$pod\",container!=\"\",container!=\"POD\"})",
+     "legendFormat": "{{pod}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 32,
+   "type": "timeseries",
+   "title": "CPU, by pod",
+   "description": "Cores in use.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 8,
+    "x": 8,
+    "y": 59
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 10,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",pod=~\"$pod\",container!=\"\",container!=\"POD\"}[2m]))",
+     "legendFormat": "{{pod}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 33,
    "type": "timeseries",
    "title": "Restarts and ready replicas",
    "description": "",
@@ -1388,7 +1565,7 @@
     "h": 7,
     "w": 8,
     "x": 16,
-    "y": 51
+    "y": 59
    },
    "fieldConfig": {
     "defaults": {
@@ -1434,7 +1611,7 @@
    ]
   },
   {
-   "id": 30,
+   "id": 34,
    "type": "timeseries",
    "title": "Network received, by pod",
    "description": "A model download shows here as a long plateau; requests as small bumps.",
@@ -1446,7 +1623,7 @@
     "h": 7,
     "w": 8,
     "x": 0,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -1483,7 +1660,7 @@
    ]
   },
   {
-   "id": 31,
+   "id": 35,
    "type": "timeseries",
    "title": "Network sent, by pod",
    "description": "",
@@ -1495,7 +1672,7 @@
     "h": 7,
     "w": 8,
     "x": 8,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -1532,7 +1709,7 @@
    ]
   },
   {
-   "id": 32,
+   "id": 36,
    "type": "timeseries",
    "title": "Dropped packets and errors, by pod",
    "description": "",
@@ -1544,7 +1721,7 @@
     "h": 7,
     "w": 8,
     "x": 16,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -1590,7 +1767,7 @@
    ]
   },
   {
-   "id": 33,
+   "id": 37,
    "type": "row",
    "title": "Node",
    "collapsed": false,
@@ -1598,11 +1775,11 @@
     "h": 1,
     "w": 24,
     "x": 0,
-    "y": 65
+    "y": 73
    }
   },
   {
-   "id": 34,
+   "id": 38,
    "type": "timeseries",
    "title": "Memory",
    "description": "kind nodes are containers on one machine, so both nodes report the laptop's memory.",
@@ -1614,7 +1791,7 @@
     "h": 7,
     "w": 8,
     "x": 0,
-    "y": 66
+    "y": 74
    },
    "fieldConfig": {
     "defaults": {
@@ -1660,7 +1837,7 @@
    ]
   },
   {
-   "id": 35,
+   "id": 39,
    "type": "timeseries",
    "title": "Network, by interface",
    "description": "",
@@ -1672,7 +1849,7 @@
     "h": 7,
     "w": 8,
     "x": 8,
-    "y": 66
+    "y": 74
    },
    "fieldConfig": {
     "defaults": {
@@ -1718,7 +1895,7 @@
    ]
   },
   {
-   "id": 36,
+   "id": 40,
    "type": "timeseries",
    "title": "Disk",
    "description": "Weights loading from disk and checkpoints being written show here.",
@@ -1730,7 +1907,7 @@
     "h": 7,
     "w": 8,
     "x": 16,
-    "y": 66
+    "y": 74
    },
    "fieldConfig": {
     "defaults": {

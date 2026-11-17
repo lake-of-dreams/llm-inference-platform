@@ -1,0 +1,26 @@
+# A second objective on the qwen-small pool, for work that can wait. The
+# operator makes the first, `qwen-small`, from the service's own priority (10).
+# A request picks one by name in the x-llm-d-inference-objective header. A
+# negative priority means the request may be turned away when the pool is full.
+apiVersion: llm-d.ai/v1
+kind: InferenceObjective
+metadata:
+  name: qwen-small-batch
+  namespace: llm-platform
+spec:
+  priority: -10
+  poolRefs:
+    - name: qwen-small
+---
+# The same model, reached through llm-d's picker: requests queue there by
+# priority when the pool is full. http://qwen-small.… still goes straight to vLLM.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: qwen-small-queued, namespace: llm-platform}
+spec:
+  parentRefs: [{name: local, namespace: gateway}]
+  hostnames: [qwen-queued.172.18.255.200.nip.io]
+  rules:
+    - backendRefs: [{name: qwen-small-epp, port: 8081}]
+      # A queued request can wait a minute before its first byte.
+      timeouts: {request: 0s}

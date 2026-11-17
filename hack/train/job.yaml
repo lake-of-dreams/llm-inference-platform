@@ -1,0 +1,53 @@
+# A training job on the GPU the two model servers already share (ADR-0017).
+# It names the same claim, so the scheduler places it on the same card. It is a
+# plain Kubernetes Job, not an InferenceService: the operator serves models and
+# has no opinion on training.
+#
+# The image is the vLLM one, only because it is already on the node and holds
+# PyTorch built for the card's CUDA version. train.py comes from a ConfigMap
+# that `make train` creates.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-tiny-lm
+  namespace: llm-platform
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: train-tiny-lm
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      restartPolicy: Never
+      resourceClaims:
+        - name: gpu
+          resourceClaimName: shared-gpu
+      containers:
+        - name: train
+          image: vllm/vllm-openai:v0.33.0
+          command: ["python3", "/job/train.py"]
+          env:
+            - {name: STEPS, value: "1500"}
+            - {name: BATCH, value: "24"}
+            # A third of the card. Past it the job fails itself, not a neighbour.
+            # At a quarter, with batches of 32, it did exactly that.
+            - {name: GPU_MEMORY_SHARE, value: "0.33"}
+          ports:
+            - {name: metrics, containerPort: 8000}
+          resources:
+            requests: {cpu: "1", memory: 2Gi}
+            claims:
+              - name: gpu
+          volumeMounts:
+            - {name: job, mountPath: /job}
+            - {name: checkpoints, mountPath: /checkpoints}
+      volumes:
+        - name: job
+          configMap: {name: train-tiny-lm}
+        - name: checkpoints
+          emptyDir: {}

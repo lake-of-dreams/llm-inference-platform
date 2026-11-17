@@ -631,9 +631,29 @@ The pieces here fit that as follows:
 to priority -1 on the same GPUs. On a busy afternoon the payroll questions go first and the batch
 summaries wait, or are refused and retried later.
 
-The operator stores the objective and says so in status. Whether requests are actually queued by it
-depends on llm-d's picker running with flow control switched on, which has not been tried here
-(Part 10). ADR-0011 records the decision.
+The operator stores the objective and says so in status (ADR-0011). `make flow-control` installs
+llm-d's picker in front of the `qwen-small` pool with flow control switched on, and
+`make priority` puts it under load.
+
+**Example.** The pool counts as full at four requests in flight. Twenty batch requests arrive at
+priority -10, and eight interactive ones at priority 10 a second later. The first four batch
+requests are already running. The picker then releases all eight interactive requests before any
+of the sixteen batch requests still waiting. In the order they were answered, with `b` for batch
+and `I` for interactive:
+
+```
+bbbbIIIIIIIIbbbbbbbbbbbbbbbb
+```
+
+| | Sent | Answered | Median wait in the queue | Last one answered at |
+|---|---|---|---|---|
+| Batch, priority -10 | 20 | 20 | 4.5 s | 8.0 s |
+| Interactive, priority 10 | 8 | 8 | 0.7 s | 3.4 s |
+
+Notice that nothing was refused: the batch work waited and then ran. A caller can also say how long
+it is willing to wait. With each batch request allowing two seconds, 15 of the 20 were turned away
+with HTTP 429, and all eight interactive requests were still answered. ADR-0020 records the set-up
+and what was not measured, which includes fairness between tenants.
 
 ### 7.8 Following one request: tracing
 
@@ -694,7 +714,7 @@ make test       # envtest controller tests and the gateway tests
 make lint       # gofmt and ruff
 make validate   # schema check of the install manifests
 
-make up         # the whole GPU cluster from nothing; it runs the eight steps below
+make up         # the whole GPU cluster from nothing; it runs the nine steps below
 
 make cluster-gpu     # a kind cluster whose worker node has the host's NVIDIA GPU
 make gpu-driver      # the NVIDIA DRA driver, which publishes the GPU to the scheduler
@@ -704,10 +724,13 @@ make deploy          # build the operator image, load it into kind, apply it
 make routes          # a hostname for each UI and model API, with no port-forwards
 make chat            # a chat window with a menu of both models
 make samples-shared  # both sample models on the one GPU (8.5)
+make flow-control    # llm-d's picker in front of the vLLM pool, queuing by priority (7.7)
 
 make cluster    # or: a kind cluster with no GPU
 make samples    # the two samples with a card for vLLM alone and Ollama on CPU
 make load       # a ramp of requests, to watch on the dashboard
+make priority   # batch requests first, interactive ones behind them: who is answered first
+make train      # train a small model on the shared GPU, beside both model servers (8.6)
 ```
 
 Every version is pinned in the Makefile or in `hack/observability/install.sh`, and every step can
@@ -838,6 +861,25 @@ Notice what sharing did not do. Phi-4 mini needs 3.2 GB, so only 42% of it fitte
 the rest ran on CPU. It generated 17 tokens a second, the same as before. A model gains from a
 shared card only when it fits on it whole. ADR-0017 records the decision and the measurements.
 
+### 8.6 Training on the same card
+
+Inference only reads a model's weights. **Training** changes them, by showing the model text,
+measuring how wrong its guesses are, and nudging the weights to be less wrong. The measure of
+wrongness is called the **loss**. Lower is better.
+
+`make train` starts a Kubernetes Job that names the same shared claim as the two model servers. It
+trains a small model of 10.9 million weights to guess the next character of Python source code.
+
+**Example.** Guessing at random scores a loss of 5.545. After 1,500 steps, about two minutes, the
+loss on text the model had never seen was 1.290, down from 2.487 at step 100. Asked to continue
+`def `, it wrote lines that look like Python and mean nothing.
+
+Two things showed that the card really was shared. The job trained on 84,000 tokens a second alone
+and on 40,700 while vLLM answered a request. And the job limits itself to a third of the card's
+memory: on its first run, set to a quarter, it ran out and stopped with PyTorch's own error while
+vLLM kept serving. Without that limit the process that failed might have been a model server.
+ADR-0019 records the decision.
+
 ### 8.3 What each check proves
 
 | Check | Plain meaning | What it covers, and what it does not |
@@ -915,6 +957,8 @@ example and real measurements from the laptop GPU:
 | ADR-0016 | Tool calling is switched on per model, by naming the parser for its tool-call format |
 | ADR-0017 | Services can share one device by naming a claim that already exists; Restricted data cannot |
 | ADR-0018 | The gateway passes its trace identity to the backend, so one request is one trace |
+| ADR-0019 | A training job runs on the shared card and caps its own memory |
+| ADR-0020 | llm-d's picker runs in front of the pool with flow control on, and priority decides who goes first |
 
 ## Part 10. What is unresolved
 
@@ -934,9 +978,13 @@ person who owns the platform.
   laptop cluster nothing listened there, and the status now says so (ADR-0009).
 * **CUDA 13.** The v0.33.0 image needs a node driver recent enough for CUDA 13. The operator cannot see a node's driver version. A node that is too old shows up as a crash loop, which status reports with the container's last exit (Part 2.2), but the message will not say "driver".
 * **Scale-to-zero.** It needs a demand signal that exists with no replicas running. llm-d's
-  endpoint picker holding requests in its queue is one (ADR-0011); it has not been tried.
-* **Priority has been stored, not exercised.** The objective exists on the pool. No request has been
-  queued or shed by it, because that needs llm-d's picker with flow control on and real load.
+  endpoint picker holding requests in its queue is one (ADR-0011). The picker now runs, but this
+  has not been tried and the CRD still requires one replica.
+* **Fairness between tenants is not measured.** Priority was: interactive requests overtook waiting
+  batch requests (ADR-0020). Two tenants at the same priority sharing the queue was not tested.
+* **Training jobs have no queue and no enforced limit.** The sample job caps its own GPU memory. A
+  job that does not is stopped by nothing, and two jobs started together both get the card
+  (ADR-0019).
 * **Throughput figures are typed in.** Cost per token needs each backend's busy throughput, which
   someone measures with a load test and enters. A figure that goes stale after a model or card
   change misprices that backend until it is measured again (ADR-0005).
@@ -946,8 +994,9 @@ person who owns the platform.
   needs a home and a rotation plan; rotating it empties every group's prefix cache once (ADR-0008).
 * **The cache's embedder.** The default compares words, not meaning. The 0.93 threshold has not
   been tuned against a real embedding model (ADR-0006).
-* **Model-aware routing.** The InferencePool and the objective are created, but routing through
-  llm-d's endpoint picker has not been tried (ADR-0007).
+* **Choosing between replicas.** Requests now go through llm-d's endpoint picker, but with one
+  replica it has nothing to choose between. Its scoring on queue depth, cache use and shared
+  prefixes was not exercised (ADR-0020).
 * **Ollama is measured from outside.** Its tokens are counted by a proxy that reads the usage
   figures each answer ends with. There is no queue depth, no cache figure and no trace for it, and
   a caller that reaches the Service directly is not counted.
@@ -1000,6 +1049,7 @@ person who owns the platform.
 | Kubelet | The agent on each node that starts containers and runs probes | Part 2.3, Part 4.1 |
 | KV cache | The model's saved working state for each request, held in GPU memory | Part 1.1, Part 5.2 |
 | Ledger | The gateway's record of every call: tokens, latency and cost | Part 3, Part 7.3 |
+| Loss | A number for how wrong a model's guesses are during training; lower is better | Part 8.6 |
 | Liveness probe | A check that restarts a container that stops answering | Part 4.1 |
 | llm-d | An open-source project that schedules requests across a pool of model servers | Part 7.7 |
 | nvkind | NVIDIA's wrapper around kind that passes the host's GPUs into a node | Part 8.1 |
@@ -1036,6 +1086,7 @@ person who owns the platform.
 | Timing side channel | Learning a secret from how long something takes rather than from what it returns | Part 7.5 |
 | Token | A word or piece of a word; models read and write in tokens | Part 1.1 |
 | Trace | A timed record of one request that a trace viewer can display | Part 7.8 |
+| Training | Changing a model's weights by showing it text and correcting its guesses | Part 8.6 |
 | TTFT | Time to first token: how long a caller waits for the first word of the answer | Part 5.2, Part 7.3 |
 | Utilisation | The share of time a GPU's arithmetic units are busy | Part 1.1, Part 5.1 |
 | Vector | A list of numbers that places similar text close together | Part 7.2 |

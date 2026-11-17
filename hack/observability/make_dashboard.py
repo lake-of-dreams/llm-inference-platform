@@ -5,8 +5,8 @@ GPU, model server, pod and node panels share one time axis, so a burst of
 requests can be read downwards: tokens per second rise, Tensor Core activity
 and power follow, the pod's network and memory move with them.
 
-Metric names are those of dcgm-exporter 4.8 (…_RATIO, …_BYTES, …_WATTS) and
-vLLM 0.33. Run this again after changing a panel; the JSON is generated.
+Metric names are those of dcgm-exporter 4.8 (…_RATIO, …_BYTES, …_WATTS),
+vLLM 0.33 and hack/train/train.py. Run this again after changing a panel; the JSON is generated.
 """
 from __future__ import annotations
 
@@ -163,6 +163,20 @@ traces("Latest requests (click a row for its trace)",
        '{name="llm_request"} | select(span.gen_ai.usage.prompt_tokens, span.gen_ai.usage.completion_tokens, span.gen_ai.latency.time_to_first_token, span.gen_ai.latency.time_in_queue)', 0)
 traces("Model start-ups (each stage of loading as a span)", '{name="Overall Loading"}', 12)
 next_line(8)
+
+# ---------------------------------------------------------------- training
+row("Training: the job from `make train`")
+graph("Loss", [(f"train_loss{{{NS}}}", "training batch"),
+               (f"train_validation_loss{{{NS}}}", "held-out text")], "short", 0,
+      desc="Both should fall. Held-out loss levelling off while training loss keeps falling "
+           "means the model has started memorising its text.")
+graph("Tokens trained on per second", [(f"train_tokens_per_second{{{NS}}}", "{{pod}}")], "short", 8,
+      desc="Dips when a model server on the same card answers a request: the two take turns.")
+graph("GPU memory held by the job", [
+    (f"train_gpu_memory_allocated_bytes{{{NS}}}", "peak allocated"),
+    (f"train_gpu_memory_limit_bytes{{{NS}}}", "the job's own cap")], "bytes", 16,
+      desc="The job caps itself at a share of the card, so it fails before a neighbour does.")
+next_line(7)
 
 # ---------------------------------------------------------------- pods
 row("Pods: memory, CPU and network")
