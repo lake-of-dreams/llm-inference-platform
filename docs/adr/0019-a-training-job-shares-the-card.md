@@ -30,8 +30,8 @@ that may be a model server answering a request.
   stopped with PyTorch's own message, "934.52 MiB allowed". vLLM kept serving. The job now takes a
   third of the card with batches of 24 and peaks at 758 MiB.
 * Taking turns is visible. The job trained on 84,000 tokens a second alone, and on 40,700 during
-  the hundred steps in which vLLM answered a 150-token request. That request took 3.5 seconds; the
-  same request took 3.2 with the card otherwise idle.
+  the hundred steps in which vLLM answered a request of up to 150 tokens, which took 3.5 seconds.
+  How much the job slowed vLLM was not measured: there is no run of the same request without it.
 * `make train` runs it and follows its log.
 
 ## Open questions
